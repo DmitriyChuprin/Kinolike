@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Кинолайк — Плеер</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .error {
+      display: none;
+      text-align: center;
+      padding: 20px;
+      color: #ff6b6b;
+    }
+    .error.show { display: block; }
+  </style>
+</head>
+<body>
+  <video id="video" controls autoplay playsinline></video>
+  <div id="error" class="error"></div>
+
+  <script>
+    const video = document.getElementById('video');
+    const errorEl = document.getElementById('error');
+    const params = new URLSearchParams(window.location.search);
+    const url = params.get('url');
+    const title = params.get('title') || 'Видео';
+
+    document.title = title;
+
+    if (!url) {
+      errorEl.textContent = 'URL не указан';
+      errorEl.classList.add('show');
+    } else {
+      video.src = url;
+      video.play().catch(() => {});
+      video.onerror = () => {
+        errorEl.textContent = 'Ошибка воспроизведения';
+        errorEl.classList.add('show');
+      };
+    }
+  </script>
+</body>
+</html>
