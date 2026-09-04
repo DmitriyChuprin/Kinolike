@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS user_lists (
   tmdb_id INTEGER NOT NULL,
   media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv')),
   status TEXT NOT NULL DEFAULT 'want_to_watch'
-    CHECK(status IN ('want_to_watch','watching','watched','on_hold')),
+    CHECK(status IN ('want_to_watch','watching','watched','on_hold','not_interested')),
   rating INTEGER CHECK(rating IS NULL OR (rating >= 1 AND rating <= 10)),
   notes TEXT DEFAULT NULL,
   added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
   media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv')),
   reason TEXT,
   score REAL,
+  matched_movies JSONB NOT NULL DEFAULT '[]'::jsonb,
   generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   expires_at TIMESTAMP,
   UNIQUE(user_id, tmdb_id, media_type)

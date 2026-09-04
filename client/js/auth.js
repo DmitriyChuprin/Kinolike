@@ -33,6 +33,7 @@ const Auth = {
         const password = document.getElementById('loginPassword').value;
         
         const data = await API.auth.login(email, password);
+        if (data.token) localStorage.setItem('authToken', data.token);
         App.currentUser = data.user;
         App.updateUserUI();
         UI.toast('Добро пожаловать!');
@@ -81,6 +82,7 @@ const Auth = {
         const password = document.getElementById('regPassword').value;
         
         const data = await API.auth.register(username, email, password);
+        if (data.token) localStorage.setItem('authToken', data.token);
         App.currentUser = data.user;
         App.updateUserUI();
         UI.toast('Аккаунт создан!');

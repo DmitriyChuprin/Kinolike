@@ -9,7 +9,9 @@ function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   const bearerMatch = authHeader && authHeader.match(/^Bearer\s+(.+)$/);
   
-  const token = (cookieMatch && cookieMatch[1]) || (bearerMatch && bearerMatch[1]);
+  // Приоритет Authorization: клиент может иметь устаревшую cookie после миграции
+  // или смены домена/пути cookie.
+  const token = (bearerMatch && bearerMatch[1]) || (cookieMatch && cookieMatch[1]);
   
   if (!token) {
     return res.status(401).json({ error: 'Необходима авторизация' });
@@ -20,7 +22,10 @@ function authMiddleware(req, res, next) {
     req.user = decoded;
     next();
   } catch (err) {
-    return res.status(401).json({ error: 'Невалидный токен' });
+    // Токен может остаться у браузера после смены JWT_SECRET или переноса
+    // приложения. Удаляем его, чтобы следующий вход создал новую сессию.
+    res.clearCookie('token');
+    return res.status(401).json({ error: 'Сессия истекла. Войдите снова.', code: 'INVALID_TOKEN' });
   }
 }
 
@@ -31,7 +36,9 @@ function optionalAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   const bearerMatch = authHeader && authHeader.match(/^Bearer\s+(.+)$/);
   
-  const token = (cookieMatch && cookieMatch[1]) || (bearerMatch && bearerMatch[1]);
+  // Приоритет Authorization: клиент может иметь устаревшую cookie после миграции
+  // или смены домена/пути cookie.
+  const token = (bearerMatch && bearerMatch[1]) || (cookieMatch && cookieMatch[1]);
   
   if (token) {
     try {

@@ -3,9 +3,10 @@ const db = require('../db/database');
 const RecommendationModel = {
   async getCached(userId) {
     const { rows } = await db.query(
-      `SELECT * FROM recommendations 
-       WHERE user_id = $1 AND expires_at > NOW()
-       ORDER BY score DESC`,
+      `SELECT r.*, mm.data AS details FROM recommendations r
+       LEFT JOIN media_metadata mm ON mm.tmdb_id = r.tmdb_id AND mm.media_type = r.media_type
+       WHERE r.user_id = $1 AND r.expires_at > NOW()
+       ORDER BY r.score DESC`,
       [userId]
     );
     return rows;
@@ -27,9 +28,9 @@ const RecommendationModel = {
       await client.query('DELETE FROM recommendations WHERE user_id = $1', [userId]);
       for (const rec of unique) {
         await client.query(
-          `INSERT INTO recommendations (user_id, tmdb_id, media_type, reason, score, expires_at)
-           VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 hour' * $6)`,
-          [userId, rec.tmdb_id, rec.media_type, rec.reason, rec.score, ttlHours]
+          `INSERT INTO recommendations (user_id, tmdb_id, media_type, reason, score, matched_movies, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 hour' * $7)`,
+          [userId, rec.tmdb_id, rec.media_type, rec.reason, rec.score, JSON.stringify(rec.matched_movies || []), ttlHours]
         );
       }
       await client.query('COMMIT');

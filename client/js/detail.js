@@ -1,6 +1,6 @@
 // Детальная страница фильма/сериала
 
-// ===== Video Player (modal with position memory) =====
+// ===== Plyr video player (with position memory) =====
 const VideoPlayer = {
   _key(url, title) {
     const raw = (title || '') + url;
@@ -16,32 +16,36 @@ const VideoPlayer = {
     const video = document.getElementById('videoPlayerElement');
     const titleEl = document.getElementById('videoPlayerTitle');
 
+    this._stopTracking();
     this._lastKey = this._key(url, title);
     titleEl.textContent = title || '';
     video.src = url;
+    video.load();
 
     // Restore saved position
     const savedPos = localStorage.getItem(this._key(url, title));
     if (savedPos && parseFloat(savedPos) > 1) {
-      video.currentTime = parseFloat(savedPos);
-      titleEl.innerHTML = title + ' <span style="color:#ff6b35;font-size:0.75rem">▶ с ' + this._fmtTime(parseFloat(savedPos)) + '</span>';
+      const restorePosition = parseFloat(savedPos);
+      const resumeNote = document.createElement('span');
+      resumeNote.className = 'video-resume-note';
+      resumeNote.textContent = ` ▶ с ${this._fmtTime(restorePosition)}`;
+      titleEl.appendChild(resumeNote);
+      video.addEventListener('loadedmetadata', () => {
+        video.currentTime = Math.min(restorePosition, video.duration || restorePosition);
+      }, { once: true });
     }
 
     overlay.classList.add('active');
-    video.play().catch(() => {});
+    this.player.play().catch(() => {});
 
     // Save on pause and periodically
     this._saveInterval = setInterval(() => {
-      if (video.currentTime > 0) {
-        localStorage.setItem(this._key(url, title), video.currentTime);
-      }
+      this._savePosition(video, this._key(url, title));
     }, 5000);
 
     // Also save on pause
     this._pauseHandler = () => {
-      if (video.currentTime > 0) {
-        localStorage.setItem(this._key(url, title), video.currentTime);
-      }
+      this._savePosition(video, this._key(url, title));
     };
     video.addEventListener('pause', this._pauseHandler);
   },
@@ -50,21 +54,50 @@ const VideoPlayer = {
     const overlay = document.getElementById('videoPlayerOverlay');
     const video = document.getElementById('videoPlayerElement');
     // Save final position
-    if (video.currentTime > 0 && this._lastKey) {
-      localStorage.setItem(this._lastKey, video.currentTime);
-    }
+    this._savePosition(video, this._lastKey);
     overlay.classList.remove('active');
-    video.pause();
-    video.src = '';
-    if (this._saveInterval) clearInterval(this._saveInterval);
-    if (this._pauseHandler) video.removeEventListener('pause', this._pauseHandler);
+    this.player.pause();
+    // Повторно сохраняем после pause: Plyr может обновить currentTime
+    // только в момент остановки воспроизведения.
+    this._savePosition(video, this._lastKey);
+    video.removeAttribute('src');
+    video.load();
+    this._stopTracking();
   },
 
   _fmtTime(s) {
+    if (!Number.isFinite(s) || s < 0) return '0:00';
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const sec = Math.floor(s % 60);
     return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` : `${m}:${String(sec).padStart(2,'0')}`;
+  },
+
+  _savePosition(video, key) {
+    const position = Number(video?.currentTime);
+    if (key && Number.isFinite(position) && position > 0) {
+      localStorage.setItem(key, String(position));
+    }
+  },
+
+  _stopTracking() {
+    const video = document.getElementById('videoPlayerElement');
+    if (this._saveInterval) clearInterval(this._saveInterval);
+    if (this._pauseHandler && video) video.removeEventListener('pause', this._pauseHandler);
+    this._saveInterval = null;
+    this._pauseHandler = null;
+  },
+
+  init() {
+    const video = document.getElementById('videoPlayerElement');
+    if (!video || !window.Plyr) return;
+    this.player = new Plyr(video, {
+      controls: ['play-large', 'rewind', 'play', 'fast-forward', 'progress', 'current-time', 'duration', 'mute', 'volume', 'settings', 'pip', 'airplay', 'fullscreen'],
+      seekTime: 10,
+      settings: ['speed'],
+      speed: { selected: 1, options: [0.75, 1, 1.25, 1.5, 2] },
+      i18n: { rewind: 'Назад на {seektime} сек.', fastForward: 'Вперёд на {seektime} сек.' },
+    });
   },
 };
 
@@ -73,6 +106,7 @@ document.getElementById('videoPlayerClose')?.addEventListener('click', () => Vid
 document.getElementById('videoPlayerOverlay')?.addEventListener('click', (e) => {
   if (e.target === e.currentTarget) VideoPlayer.close();
 });
+VideoPlayer.init();
 
 const Detail = {
   async render(path) {
@@ -276,6 +310,7 @@ const Detail = {
     const statuses = [
       { value: 'want_to_watch', label: 'Хочу посмотреть' },
       { value: 'watched', label: 'Просмотрено' },
+      { value: 'not_interested', label: 'Не интересно' },
     ];
     
     return statuses.map(s => {

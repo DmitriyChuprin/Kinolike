@@ -1,109 +1,45 @@
-// Фоновая генерация рекомендаций
-// Запускается при изменении оценки/статуса, результат кэшируется
-
 const ListItemModel = require('../models/listItem');
 const RecommendationModel = require('../models/recommendation');
-const tmdbService = require('../services/tmdb');
-const { analyzePreferences } = require('../services/ai');
-
-// Очередь на генерацию (по user_id)
+const tmdb = require('./tmdb');
+const { build_user_profile, generate_recommendations } = require('./personalRecommendations');
+const config = require('./recommendationConfig');
 const pendingJobs = new Map();
 const runningJobs = new Set();
 
+async function mapWithLimit(items, limit, fn) {
+  const results = []; let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const result = await fn(items[next++]); if (result) results.push(result); }
+  }));
+  return results;
+}
+async function generate_candidates(profile, excluded) {
+  const found = new Map();
+  const add = item => { if (item && item.id && !excluded.has(Number(item.id))) found.set(Number(item.id), item); };
+  profile.ratedMovies.filter(movie => movie.rating >= 8).slice(0, 8).forEach(movie => (movie.raw.similar?.results || []).forEach(add));
+  const genres = [...profile.features.genres.entries()].filter(([, value]) => value > 0).sort((a,b) => b[1] - a[1]).slice(0, 3);
+  const discovered = await Promise.all(genres.map(([genre]) => tmdb.discoverMovies({ with_genres: genre, sort_by: 'popularity.desc', page: 1 }).catch(() => ({ results: [] }))));
+  discovered.forEach(result => (result.results || []).forEach(add));
+  if (found.size < 20) (await tmdb.getTopRatedMovies().catch(() => ({ results: [] }))).results.forEach(add);
+  return [...found.values()].slice(0, config.CANDIDATE_LIMIT);
+}
 async function generateForUser(userId) {
-  if (runningJobs.has(userId)) return;
-
+  if (runningJobs.has(userId)) return [];
   runningJobs.add(userId);
-
   try {
-    const watched = await ListItemModel.findAll(userId, { status: 'watched' });
-
-    if (watched.length === 0) {
-      await RecommendationModel.clearCache(userId);
-      return;
-    }
-
-    // Получаем данные из TMDB (с кэшированием)
-    const watchedWithDetails = await Promise.all(
-      watched.map(async (item) => {
-        try {
-          const details = item.media_type === 'movie'
-            ? await tmdbService.getMovieDetails(item.tmdb_id)
-            : await tmdbService.getTvDetails(item.tmdb_id);
-
-          return {
-            tmdb_id: item.tmdb_id,
-            media_type: item.media_type,
-            title: details.title || details.name,
-            rating: item.rating,
-            genres: (details.genres || []).map(g => g.name).join(', '),
-          };
-        } catch (err) {
-          return {
-            tmdb_id: item.tmdb_id,
-            media_type: item.media_type,
-            title: `TMDB #${item.tmdb_id}`,
-            rating: item.rating,
-            genres: '',
-          };
-        }
-      })
-    );
-
-    // Генерируем через AI: анализ предпочтений → TMDB Discover (только фильмы,
-    // сериалы рекомендуются через жанровые подборки)
-    const forAnalysis = watchedWithDetails.filter(w => w.rating).slice(0, 50);
-    if (forAnalysis.length === 0) return;
-
-    const preferences = await analyzePreferences(forAnalysis);
-    const movieParams = preferences.movie_params || {
-      sort_by: 'vote_average.desc',
-      'vote_average.gte': 6,
-    };
-
-    const movieResults = await tmdbService.discoverMovies(movieParams).catch(err => {
-      console.error('[Recommendations] Ошибка фонового discover:', err.message);
-      return { results: [] };
-    });
-
-    // Исключаем просмотренные и «хочу посмотреть»
-    const wantToWatch = await ListItemModel.findAll(userId, { status: 'want_to_watch' });
-    const excludeIds = new Set([
-      ...watched.map(i => i.tmdb_id),
-      ...wantToWatch.map(i => i.tmdb_id),
-    ]);
-
-    const limit = parseInt(process.env.AI_RECOMMENDATIONS_LIMIT) || 20;
-    const recommendations = (movieResults.results || [])
-      .filter(r => !excludeIds.has(r.id))
-      .slice(0, limit)
-      .map(item => ({
-        tmdb_id: item.id,
-        media_type: 'movie',
-        score: item.vote_average ? parseFloat(item.vote_average.toFixed(1)) : 0,
-      }));
-
-    // Сохраняем в кэш
-    const ttl = parseInt(process.env.AI_CACHE_TTL) || 24;
-    await RecommendationModel.save(userId, recommendations, ttl);
-
-    console.log(`Рекомендации сгенерированы для пользователя ${userId}: ${recommendations.length} шт.`);
-  } catch (err) {
-    console.error(`Ошибка фоновой генерации рекомендаций для ${userId}:`, err.message);
-  } finally {
-    runningJobs.delete(userId);
-    if (pendingJobs.has(userId)) {
-      pendingJobs.delete(userId);
-      generateForUser(userId);
-    }
-  }
+    const all = await ListItemModel.findAllWithMetadata(userId);
+    const watched = all.filter(item => item.status === 'watched' && item.media_type === 'movie');
+    const profile = build_user_profile(watched);
+    if (!profile.isSufficient) { await RecommendationModel.clearCache(userId); return []; }
+    const candidates = await generate_candidates(profile, new Set(all.map(item => Number(item.tmdb_id))));
+    const details = await mapWithLimit(candidates, 4, item => tmdb.getMovieDetails(item.id).catch(() => null));
+    const { recommendations } = generate_recommendations({ watched, candidates: details });
+    await RecommendationModel.save(userId, recommendations, Number(process.env.RECOMMENDATIONS_CACHE_TTL) || 24);
+    return recommendations;
+  } finally { runningJobs.delete(userId); }
 }
-
-// Запланировать генерацию (debounce 2 сек)
-// AI-рекомендации временно отключены — фоновая генерация не запускается,
-// чтобы не тратить токены AI (страница рекомендаций работает на жанровых подборках)
 function scheduleGeneration(userId) {
-  return;
+  if (pendingJobs.has(userId)) clearTimeout(pendingJobs.get(userId));
+  pendingJobs.set(userId, setTimeout(() => { pendingJobs.delete(userId); generateForUser(userId).catch(err => console.error('[Recommendations]', err.message)); }, Number(process.env.RECOMMENDATIONS_DEBOUNCE_MS) || 1500));
 }
-
-module.exports = { scheduleGeneration, generateForUser };
+module.exports = { scheduleGeneration, generateForUser, generate_candidates };

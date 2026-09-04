@@ -3,7 +3,7 @@ const router = express.Router();
 const ListItemModel = require('../models/listItem');
 const RecommendationModel = require('../models/recommendation');
 const tmdbService = require('../services/tmdb');
-const { analyzePreferences, generateReason } = require('../services/ai');
+const { generateForUser } = require('../services/backgroundRecommendations');
 const { authMiddleware } = require('../middleware/auth');
 
 router.use(authMiddleware);
@@ -22,7 +22,7 @@ router.get('/', async (req, res) => {
     // Из кэша отдаём только фильмы (сериалы — в жанровых подборках)
     const movieItems = cached.filter(i => i.media_type === 'movie');
     if (movieItems.length > 0) {
-      return res.json({ items: movieItems, fromCache: true });
+      return res.json({ items: movieItems, recommendations: movieItems.map(item => ({ movie_id: item.tmdb_id, tmdb_id: item.tmdb_id, media_type: item.media_type, title: item.details?.title || item.details?.name || `TMDB #${item.tmdb_id}`, score: Number(item.score), reason: item.reason, matched_movies: item.matched_movies || [], poster_path: item.details?.poster_path || null, overview: item.details?.overview || '' })), fromCache: true });
     }
 
     return await generateAndReturn(userId, res);
@@ -327,104 +327,22 @@ router.delete('/cache', async (req, res) => {
 });
 
 // Вспомогательная функция: генерация и возврат
-async function generateAndReturn(userId, res, customQuery = null) {
-  // 1. Получаем просмотренные и "хочу посмотреть"
-  const [watched, wantToWatch] = await Promise.all([
-    ListItemModel.findAll(userId, { status: 'watched' }),
-    ListItemModel.findAll(userId, { status: 'want_to_watch' }),
-  ]);
-
-  if (watched.length === 0) {
-    return res.json({
-      items: [],
-      message: 'Добавьте несколько просмотренных фильмов или сериалов, чтобы получить персонализированные рекомендации',
-    });
-  }
-
-  // 2. Собираем ID которые нужно исключить (просмотренные + хочу посмотреть)
-  const excludeIds = new Set([
-    ...watched.map(i => i.tmdb_id),
-    ...wantToWatch.map(i => i.tmdb_id),
-  ]);
-
-  console.log(`[Recommendations] Исключаем ${excludeIds.size} фильмов/сериалов (${watched.length} просмотрено, ${wantToWatch.length} в списке)`);
-
-  // 3. Получаем данные из TMDB для анализа предпочтений (только просмотренные с оценками)
-  const watchedForAnalysis = watched
-    .filter(i => i.rating) // Берём только с оценками для лучшего анализа
-    .slice(0, 50); // Ограничиваем чтобы не перегружать AI
-
-  const watchedWithDetails = await Promise.all(
-    watchedForAnalysis.map(async (item) => {
-      try {
-        const details = item.media_type === 'movie'
-          ? await tmdbService.getMovieDetails(item.tmdb_id)
-          : await tmdbService.getTvDetails(item.tmdb_id);
-
-        return {
-          tmdb_id: item.tmdb_id,
-          media_type: item.media_type,
-          title: details.title || details.name,
-          rating: item.rating,
-          genres: (details.genres || []).map(g => g.name).join(', '),
-          year: (details.release_date || details.first_air_date || '').slice(0, 4),
-        };
-      } catch (err) {
-        return {
-          tmdb_id: item.tmdb_id,
-          media_type: item.media_type,
-          title: `TMDB #${item.tmdb_id}`,
-          rating: item.rating,
-          genres: '',
-          year: '',
-        };
-      }
-    })
-  );
-
-  // 4. AI анализирует предпочтения и возвращает параметры для TMDB Discover
-  console.log('[Recommendations] Анализируем предпочтения через AI...');
-  const preferences = await analyzePreferences(watchedWithDetails, customQuery);
-  console.log('[Recommendations] Анализ:', preferences.analysis);
-
-  // 5. Делаем запрос к TMDB Discover с параметрами от AI (только фильмы —
-  // сериалы рекомендуются через жанровые подборки)
-  // Фолбэк: если AI не вернул movie_params — используем умеренные параметры
-  const movieParams = preferences.movie_params || {
-    sort_by: 'vote_average.desc',
-    'vote_average.gte': 6,
-  };
-  console.log('[Recommendations] movie_params:', JSON.stringify(movieParams));
-
-  const movieResults = await tmdbService.discoverMovies(movieParams).catch(err => {
-    console.error('[Recommendations] Ошибка discover movies:', err.message);
-    return { results: [] };
-  });
-
-  // 6. Исключаем просмотренные/хочу посмотреть
-  const allResults = (movieResults.results || []).map(r => ({ ...r, media_type: 'movie' }));
-
-  const filtered = allResults.filter(r => !excludeIds.has(r.id));
-
-  // 7. Берём топ-N и генерируем причины
-  const limit = parseInt(process.env.AI_RECOMMENDATIONS_LIMIT) || 20;
-  const topResults = filtered.slice(0, limit);
-
-  console.log(`[Recommendations] Найдено ${allResults.length}, после фильтрации ${filtered.length}, берём ${topResults.length}`);
-
-  // 8. Формируем рекомендации
-  const recommendations = topResults.map(item => ({
-    tmdb_id: item.id,
-    media_type: item.media_type,
-    score: item.vote_average ? parseFloat(item.vote_average.toFixed(1)) : 0,
-  }));
-
-  // 9. Сохраняем в кэш
-  const ttl = parseInt(process.env.AI_CACHE_TTL) || 24;
-  await RecommendationModel.save(userId, recommendations, ttl);
-
+async function generateAndReturn(userId, res) {
+  await RecommendationModel.clearCache(userId);
+  const generated = await generateForUser(userId);
   const items = await RecommendationModel.getCached(userId);
-  res.json({ items, fromCache: false, analysis: preferences.analysis });
+  const recommendations = items.map(item => ({
+    movie_id: item.tmdb_id,
+    tmdb_id: item.tmdb_id,
+    media_type: item.media_type,
+    title: item.details?.title || item.details?.name || `TMDB #${item.tmdb_id}`,
+    score: Number(item.score),
+    reason: item.reason,
+    matched_movies: item.matched_movies || [],
+    poster_path: item.details?.poster_path || null,
+    overview: item.details?.overview || '',
+  }));
+  res.json({ items: recommendations, recommendations, fromCache: false,
+    message: generated.length ? undefined : 'Оцените как минимум два просмотренных фильма, чтобы получить персональные рекомендации.' });
 }
-
 module.exports = router;

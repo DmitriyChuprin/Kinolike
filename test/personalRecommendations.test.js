@@ -1,0 +1,17 @@
+const assert = require('assert');
+const { build_user_profile, calculate_movie_score, apply_diversity, generate_recommendations } = require('../server/services/personalRecommendations');
+const movie = (id, title, rating, genre, director = 'd1', cast = 'a1', overview = 'space future journey') => ({ tmdb_id: id, media_type: 'movie', rating, details: { id, title, genres: [{ id: genre, name: genre }], overview, vote_average: 8, vote_count: 500, release_date: '2020-01-01', original_language: 'en', credits: { crew: [{ id: director, name: director, job: 'Director' }], cast: [{ id: cast, name: cast }] } } });
+const liked = movie(1, 'Loved', 10, 'sci-fi');
+const liked2 = movie(2, 'Loved 2', 9, 'sci-fi', 'd2', 'a2');
+const disliked = movie(3, 'Disliked', 2, 'comedy', 'd3', 'a3', 'party joke');
+const profile = build_user_profile([liked, liked2, disliked]);
+assert(profile.isSufficient, 'two rated films build a sufficient profile');
+assert(profile.features.genres.get('sci-fi') > 0, 'positive rating raises genre preference');
+assert(profile.features.genres.get('comedy') < 0, 'negative rating lowers genre preference');
+assert(calculate_movie_score(movie(10, 'Candidate sci-fi', null, 'sci-fi'), profile).score > calculate_movie_score(movie(11, 'Candidate comedy', null, 'comedy', 'd3', 'a3', 'party joke'), profile).score, 'liked features outrank disliked features');
+assert(!build_user_profile([liked]).isSufficient, 'one rating is insufficient');
+const result = generate_recommendations({ watched: [liked, liked2, disliked], candidates: [liked, movie(20, 'New', null, 'sci-fi'), movie(21, 'New 2', null, 'comedy')] });
+assert(!result.recommendations.some(r => r.movie_id === 1), 'watched film is excluded');
+const scored = [1, 2, 3, 4].map((id, index) => ({ score: 100 - index, candidate: { genres: new Set(['same']), directors: new Set(['same-director']) } }));
+assert(apply_diversity(scored, 4).length < 4, 'diversity prevents a single genre/director from filling results');
+console.log('personalRecommendations: OK');

@@ -66,6 +66,25 @@ const App = {
   route() {
     const hash = window.location.hash || '#/';
     const path = hash.slice(1);
+
+    // Эти страницы используют данные, привязанные к пользователю. После
+    // миграции JWT из старой сессии может стать недействительным: не даём
+    // вместо понятного входа отрисовывать ошибку API на пустой странице.
+    const requiresAuth = ['/want', '/watched', '/recommendations', '/profile'];
+    if (requiresAuth.includes(path) && !this.currentUser) {
+      UI.toast('Сессия истекла. Войдите снова, чтобы увидеть свои данные.', 'error');
+      window.location.hash = '#/login';
+      return;
+    }
+
+    // Карточки фильмов и сериалов доступны только авторизованным пользователям.
+    // Проверка работает и при клике по карточке, и при прямом переходе по ссылке.
+    const isDetailPage = path.startsWith('/movie/') || path.startsWith('/tv/');
+    if (isDetailPage && !this.currentUser) {
+      UI.toast('Войдите в аккаунт, чтобы открыть карточку фильма', 'error');
+      window.location.hash = '#/login';
+      return;
+    }
     
     // Определяем страницу
     if (path === '/' || path === '') {
@@ -178,6 +197,7 @@ const App = {
     document.getElementById('logoutBtn').addEventListener('click', async () => {
       try {
         await API.auth.logout();
+        localStorage.removeItem('authToken');
         this.currentUser = null;
         this.updateUserUI();
         UI.toast('Вы вышли из аккаунта');

@@ -59,6 +59,8 @@ router.post('/', async (req, res) => {
       await ListItemModel.update(existing.id, { status: status || 'want_to_watch' });
       const updated = await ListItemModel.findById(existing.id);
       ensureMetadata(tmdb_id, media_type);
+    scheduleGeneration(req.user.id);
+      scheduleGeneration(req.user.id);
       return res.json({ item: updated });
     }
 
@@ -106,6 +108,7 @@ router.delete('/:id', async (req, res) => {
     }
 
     await ListItemModel.delete(req.params.id);
+    scheduleGeneration(req.user.id);
 
     res.json({ message: 'Удалено' });
   } catch (err) {
@@ -134,6 +137,7 @@ router.post('/import', async (req, res) => {
     }
 
     await ListItemModel.importAll(req.user.id, items);
+    scheduleGeneration(req.user.id);
 
     res.json({ message: 'Импорт завершён', count: items.length });
   } catch (err) {

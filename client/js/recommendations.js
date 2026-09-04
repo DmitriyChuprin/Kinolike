@@ -25,6 +25,16 @@ const Recommendations = {
     app.innerHTML = `
       <h1 class="page-title">Рекомендации</h1>
 
+      <section class="personal-recommendations" id="personalRecommendations">
+        <div class="section-header">
+          <h2 class="section-title">Персонально для вас</h2>
+          <button class="btn btn-secondary btn-sm" id="refreshPersonalRecommendations">Обновить</button>
+        </div>
+        <div class="movies-grid" id="personalRecommendationsGrid">
+          <div class="loading-spinner"><div class="spinner"></div></div>
+        </div>
+      </section>
+
       <!-- Фильтры -->
       <div class="recs-filters">
         <div class="recs-type-tabs">
@@ -88,7 +98,34 @@ const Recommendations = {
 
     this.initFilters();
     this.populateDropdowns();
-    await this.loadGenreCollections();
+    document.getElementById("refreshPersonalRecommendations")?.addEventListener("click", () => this.loadPersonalRecommendations(true));
+    await Promise.all([this.loadPersonalRecommendations(), this.loadGenreCollections()]);
+  },
+
+  // ===== Персональные рекомендации =====
+  async loadPersonalRecommendations(refresh = false) {
+    const grid = document.getElementById("personalRecommendationsGrid");
+    const button = document.getElementById("refreshPersonalRecommendations");
+    if (!grid) return;
+    if (refresh) {
+      grid.innerHTML = "<div class=\"loading-spinner\"><div class=\"spinner\"></div></div>";
+      if (button) button.disabled = true;
+    }
+    try {
+      const data = await API.recommendations.get(refresh);
+      const items = data.items || data.recommendations || [];
+      if (!items.length) {
+        grid.innerHTML = "<p class=\"recommendations-hint\">" + UI.escapeHtml(data.message || "Оцените минимум два просмотренных фильма, чтобы получить персональные рекомендации.") + "</p>";
+        return;
+      }
+      grid.innerHTML = items.map(item => UI.movieCardWithGenres(item, App.getAllGenres())).join("");
+      this.initGridEvents(grid);
+    } catch (err) {
+      console.error("Ошибка персональных рекомендаций:", err);
+      grid.innerHTML = "<p class=\"recommendations-hint\">Не удалось загрузить персональные рекомендации: " + UI.escapeHtml(err.message) + "</p>";
+    } finally {
+      if (button) button.disabled = false;
+    }
   },
 
   // ===== Инициализация фильтров =====
