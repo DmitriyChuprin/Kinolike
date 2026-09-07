@@ -285,10 +285,7 @@ const Detail = {
           <div class="detail-section">
             <h3>Трейлер</h3>
             <div class="trailer-container">
-              <video controls style="width:100%;border-radius:var(--radius-lg)" poster="https://img.youtube.com/vi/${trailer.key}/hqdefault.jpg">
-                <source src="/api/youtube/proxy?video_id=${trailer.key}" type="video/mp4">
-                Ваш браузер не поддерживает видео.
-              </video>
+              <iframe src="https://www.youtube.com/embed/${trailer.key}" style="width:100%;aspect-ratio:16/9;border:none;border-radius:var(--radius-lg)" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe>
             </div>
           </div>
         ` : ''}

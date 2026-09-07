@@ -14,8 +14,8 @@ if (process.env.TMDB_PROXY_ENABLED === 'true') {
   const user = process.env.TMDB_PROXY_USERNAME;
   const pass = process.env.TMDB_PROXY_PASSWORD;
   if (type === 'socks5') {
-    proxyUrl = `socks5://${host}:${port}`;
-    if (user && pass) proxyUrl = `socks5://${user}:${pass}@${host}:${port}`;
+    proxyUrl = `socks5h://${host}:${port}`;
+    if (user && pass) proxyUrl = `socks5h://${user}:${pass}@${host}:${port}`;
   }
 }
 
@@ -27,7 +27,7 @@ router.get('/stream-url', (req, res) => {
   const args = [
     '--no-warnings',
     '--no-playlist',
-    '-f', 'best[height<=720]',
+    '-f', "bestvideo[height<=720]+bestaudio/best[height<=720]",
     '--get-url',
     `https://www.youtube.com/watch?v=${video_id}`
   ];
@@ -54,7 +54,7 @@ router.get('/proxy', (req, res) => {
   const args = [
     '--no-warnings',
     '--no-playlist',
-    '-f', 'best[height<=720]',
+    '-f', "bestvideo[height<=720]+bestaudio/best[height<=720]",
     '--get-url',
     `https://www.youtube.com/watch?v=${video_id}`
   ];
