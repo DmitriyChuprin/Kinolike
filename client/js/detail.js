@@ -284,13 +284,20 @@ const Detail = {
         ${trailer ? `
           <div class="detail-section">
             <h3>Трейлер</h3>
-            <div class="trailer-container">
-              <a href="https://www.youtube.com/watch?v=${trailer.key}" target="_blank" rel="noopener" style="display:block;position:relative;text-decoration:none">
-                <img src="https://img.youtube.com/vi/${trailer.key}/hqdefault.jpg" alt="Трейлер" style="width:100%;border-radius:var(--radius-lg);display:block">
-                <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:68px;height:48px;background:rgba(0,0,0,0.7);border-radius:12px;display:flex;align-items:center;justify-content:center">
-                  <svg viewBox="0 0 24 24" fill="white" width="28" height="28"><path d="M8 5v14l11-7z"/></svg>
-                </div>
-              </a>
+            <div class="trailer-container" id="trailerContainer">
+              <div id="trailerPlayer" style="position:relative;width:100%;padding-top:56.25%;background:#000;border-radius:var(--radius-lg);overflow:hidden">
+                <iframe id="trailerFrame" src="https://www.youtube.com/embed/${trailer.key}?rel=0&modestbranding=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:none" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe>
+              </div>
+              <script>
+                (function(){
+                  var frame = document.getElementById('trailerFrame');
+                  if(!frame) return;
+                  frame.onerror = function(){
+                    var c = document.getElementById('trailerContainer');
+                    c.innerHTML = '<a href="https://www.youtube.com/watch?v=${trailer.key}" target="_blank" rel="noopener" style="display:block;text-decoration:none"><img src="https://img.youtube.com/vi/${trailer.key}/hqdefault.jpg" alt="Трейлер" style="width:100%;border-radius:var(--radius-lg)"></a>';
+                  };
+                })();
+              </script>
             </div>
           </div>
         ` : ''}
