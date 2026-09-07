@@ -116,7 +116,12 @@ const Recommendations = {
     }
     try {
       const data = await API.recommendations.get(refresh);
-      const items = data.items || data.recommendations || [];
+      const rawItems = data.items || data.recommendations || [];
+      // Развернуть details на верхний уровень для movieCardWithGenres
+      const items = rawItems.map(item => ({
+        ...item,
+        ...(item.details || {}),
+      }));
 
       // Если генерация в фоне — показываем спиннер и poll
       if (data.pending && !items.length) {
