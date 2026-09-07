@@ -285,7 +285,12 @@ const Detail = {
           <div class="detail-section">
             <h3>Трейлер</h3>
             <div class="trailer-container">
-              <iframe src="https://www.youtube.com/embed/${trailer.key}" style="width:100%;aspect-ratio:16/9;border:none;border-radius:var(--radius-lg)" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe>
+              <a href="https://www.youtube.com/watch?v=${trailer.key}" target="_blank" rel="noopener" style="display:block;position:relative;text-decoration:none">
+                <img src="https://img.youtube.com/vi/${trailer.key}/hqdefault.jpg" alt="Трейлер" style="width:100%;border-radius:var(--radius-lg);display:block">
+                <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:68px;height:48px;background:rgba(0,0,0,0.7);border-radius:12px;display:flex;align-items:center;justify-content:center">
+                  <svg viewBox="0 0 24 24" fill="white" width="28" height="28"><path d="M8 5v14l11-7z"/></svg>
+                </div>
+              </a>
             </div>
           </div>
         ` : ''}
