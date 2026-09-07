@@ -14,6 +14,9 @@ const Recommendations = {
   totalPages: 0,
 
   async render() {
+    // Очистить poll-таймер предыдущей страницы
+    if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+
     if (!App.currentUser) {
       const app = document.getElementById('app');
       UI.emptyState(app, 'Войдите в аккаунт', 'Рекомендации доступны для авторизованных пользователей');
@@ -114,6 +117,17 @@ const Recommendations = {
     try {
       const data = await API.recommendations.get(refresh);
       const items = data.items || data.recommendations || [];
+
+      // Если генерация в фоне — показываем спиннер и poll
+      if (data.pending && !items.length) {
+        grid.innerHTML = "<div class=\"loading-spinner\"><div class=\"spinner\"></div></div><p class=\"recommendations-hint\">Рекомендации рассчитываются...</p>";
+        this._pollTimer = setTimeout(() => this.loadPersonalRecommendations(), 3000);
+        return;
+      }
+
+      // Остановить poll если был
+      if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+
       if (!items.length) {
         grid.innerHTML = "<p class=\"recommendations-hint\">" + UI.escapeHtml(data.message || "Оцените минимум два просмотренных фильма, чтобы получить персональные рекомендации.") + "</p>";
         return;

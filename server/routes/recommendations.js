@@ -25,7 +25,12 @@ router.get('/', async (req, res) => {
       return res.json({ items: movieItems, recommendations: movieItems.map(item => ({ movie_id: item.tmdb_id, tmdb_id: item.tmdb_id, media_type: item.media_type, title: item.details?.title || item.details?.name || `TMDB #${item.tmdb_id}`, score: Number(item.score), reason: item.reason, matched_movies: item.matched_movies || [], poster_path: item.details?.poster_path || null, overview: item.details?.overview || '' })), fromCache: true });
     }
 
-    return await generateAndReturn(userId, res);
+    // Кэш пустой — запускаем генерацию в фоне, возвращаем pending
+    const { runningJobs } = require('../services/backgroundRecommendations');
+    if (!runningJobs.has(userId)) {
+      generateForUser(userId).catch(err => console.error('[Recommendations] background error:', err.message));
+    }
+    return res.json({ items: [], recommendations: [], pending: true, message: 'Рекомендации рассчитываются...' });
   } catch (err) {
     console.error('Ошибка рекомендаций:', err);
     res.status(500).json({ error: 'Не удалось получить рекомендации' });

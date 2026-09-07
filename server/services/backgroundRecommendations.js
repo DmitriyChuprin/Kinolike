@@ -48,4 +48,4 @@ function scheduleGeneration(userId) {
   if (pendingJobs.has(userId)) clearTimeout(pendingJobs.get(userId));
   pendingJobs.set(userId, setTimeout(() => { pendingJobs.delete(userId); generateForUser(userId).catch(err => console.error('[Recommendations]', err.message)); }, Number(process.env.RECOMMENDATIONS_DEBOUNCE_MS) || 1500));
 }
-module.exports = { scheduleGeneration, generateForUser, generate_candidates };
+module.exports = { scheduleGeneration, generateForUser, generate_candidates, runningJobs };
