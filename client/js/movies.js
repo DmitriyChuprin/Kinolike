@@ -19,20 +19,15 @@ const Movies = {
 
       // Персональные блоки (для авторизованных)
       let wantItems = [];
-      let favCollection = null;
       let continueWatching = [];
       if (App.currentUser) {
-        const [wantData, favData, positionsData] = await Promise.all([
+        const [wantData, positionsData] = await Promise.all([
           API.lists.get({ status: 'want_to_watch' }).catch(() => ({ items: [] })),
-          API.recommendations.favoriteGenre().catch(() => ({ collection: null })),
           API.watchPositions.get().catch(() => ({ items: [] })),
         ]);
         wantItems = (wantData.items || [])
           .map(item => this.mapListItem(item))
           .filter(i => i.poster_path);
-        favCollection = favData.collection && favData.collection.items.length
-          ? favData.collection
-          : null;
         continueWatching = (positionsData.items || []).map(pos => ({
           id: pos.tmdb_id,
           media_type: pos.media_type,
@@ -69,10 +64,6 @@ const Movies = {
 
           ${this.renderRailSection('Из вашего списка', wantItems, genres)}
 
-          ${favCollection
-            ? this.renderRailSection(favCollection.title, favCollection.items, genres)
-            : ''}
-
           ${this.renderRailSection('В тренде за неделю',
             (trendingMovies.results || []).slice(0, 18), genres)}
 
@@ -94,6 +85,7 @@ const Movies = {
       this.initRails();
       this.initCardClicks();
       this.initStatusButtons();
+      this.initContinueWatchingButtons();
 
     } catch (err) {
       console.error('Ошибка загрузки каталога:', err);
@@ -166,6 +158,7 @@ const Movies = {
               const remaining = h > 0 ? `${h} ч ${m} мин` : `${m} мин`;
               return `
                 <div class="movie-card" data-id="${item.id}" data-type="${item.media_type}" style="position:relative">
+                  <button class="cw-remove-btn" data-id="${item.id}" data-type="${item.media_type}" title="Удалить из «Продолжить просмотр»">×</button>
                   <div class="movie-card-poster">
                     ${item.poster_path
                       ? `<img src="${IMG.poster(item.poster_path)}" alt="${UI.escapeHtml(item.title || '')}">`
@@ -187,6 +180,27 @@ const Movies = {
         </div>
       </div>
     `;
+  },
+
+  // Кнопки удаления из «Продолжить просмотр»
+  initContinueWatchingButtons() {
+    document.querySelectorAll('.cw-remove-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const type = btn.dataset.type;
+        const card = btn.closest('.movie-card');
+
+        await API.watchPositions.remove(id, type).catch(() => {});
+        if (card) card.remove();
+
+        // Если секция пуста — убрать целиком
+        const section = document.querySelector('.section');
+        if (section && !section.querySelector('.movie-card')) {
+          section.remove();
+        }
+      });
+    });
   },
 
   // Секция с горизонтальной подборкой
@@ -279,9 +293,10 @@ const Movies = {
   initCardClicks() {
     document.querySelectorAll('.movie-card').forEach(card => {
       card.addEventListener('click', (e) => {
-        // Игнорируем клик по кнопке статуса / обновления
+        // Игнорируем клик по кнопке статуса / обновления / удаления
         if (e.target.closest('.status-btn')) return;
         if (e.target.closest('.card-refresh')) return;
+        if (e.target.closest('.cw-remove-btn')) return;
 
         const id = card.dataset.id;
         const type = card.dataset.type;

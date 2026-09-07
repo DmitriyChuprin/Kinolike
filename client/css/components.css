@@ -1585,3 +1585,31 @@
   color: var(--accent);
   font-weight: 600;
 }
+
+/* Continue Watching — кнопка удаления */
+.cw-remove-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 5;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+}
+.movie-card:hover .cw-remove-btn {
+  opacity: 1;
+}
+.cw-remove-btn:hover {
+  background: rgba(220,50,50,0.9);
+}
