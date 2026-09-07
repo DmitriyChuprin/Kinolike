@@ -32,7 +32,28 @@ const ListItemModel = {
   // Список с метаданными из media_metadata (один SQL-запрос вместо N HTTP)
   async findAllWithMetadata(userId, { status, media_type, sort } = {}) {
     let query = `
-      SELECT ul.*, mm.data as details
+      SELECT ul.*,
+             mm.data as details,
+             mm.release_year,
+             mm.title as media_title,
+             mm.poster_path,
+             mm.overview,
+             COALESCE(
+               (SELECT json_agg(g.name ORDER BY g.name)
+                FROM media_genres mg JOIN genres g ON g.id = mg.genre_id
+                WHERE mg.media_metadata_id = mm.id),
+               '[]'::json
+             ) as genre_names,
+             COALESCE(
+               (SELECT json_agg(md2.name ORDER BY md2.name)
+                FROM media_directors md2 WHERE md2.media_metadata_id = mm.id),
+               '[]'::json
+             ) as director_names,
+             COALESCE(
+               (SELECT json_agg(ma.name ORDER BY ma.sort_order)
+                FROM media_actors ma WHERE ma.media_metadata_id = mm.id),
+               '[]'::json
+             ) as actor_names
       FROM user_lists ul
       LEFT JOIN media_metadata mm
         ON mm.tmdb_id = ul.tmdb_id AND mm.media_type = ul.media_type

@@ -18,12 +18,12 @@ if (process.env.TMDB_PROXY_ENABLED === 'true') {
   const pass = process.env.TMDB_PROXY_PASSWORD;
 
   if (type === 'socks5') {
-    let proxyUrl = `socks5://${host}:${port}`;
+    let proxyUrl = `socks5h://${host}:${port}`;
     if (user && pass) {
-      proxyUrl = `socks5://${user}:${pass}@${host}:${port}`;
+      proxyUrl = `socks5h://${user}:${pass}@${host}:${port}`;
     }
     agent = new SocksProxyAgent(proxyUrl);
-    console.log(`TMDB прокси подключен: socks5://${user ? '***@' : ''}${host}:${port}`);
+    console.log(`TMDB прокси подключен: socks5h://${user ? '***@' : ''}${host}:${port}`);
   } else {
     console.log(`TMDB прокси типа "${type}" пока не поддерживается`);
   }
@@ -66,16 +66,35 @@ async function getFromCache(endpoint, params) {
 
 /**
  * Получить метаданные фильма/сериала из БД (бессрочно)
+ * Включает нормализованные поля: год, жанры, режиссёры, актёры
  */
 async function getMediaMetadata(tmdbId, mediaType) {
   try {
     const { rows } = await db.query(
-      `SELECT data FROM media_metadata WHERE tmdb_id = $1 AND media_type = $2`,
+      `SELECT mm.*,
+              COALESCE(
+                (SELECT json_agg(json_build_object('id', g.id, 'name', g.name) ORDER BY g.name)
+                 FROM media_genres mg JOIN genres g ON g.id = mg.genre_id
+                 WHERE mg.media_metadata_id = mm.id),
+                '[]'::json
+              ) as genres,
+              COALESCE(
+                (SELECT json_agg(json_build_object('person_id', md.person_id, 'name', md.name) ORDER BY md.name)
+                 FROM media_directors md WHERE md.media_metadata_id = mm.id),
+                '[]'::json
+              ) as directors,
+              COALESCE(
+                (SELECT json_agg(json_build_object('person_id', ma.person_id, 'name', ma.name, 'character_name', ma.character_name, 'sort_order', ma.sort_order) ORDER BY ma.sort_order)
+                 FROM media_actors ma WHERE ma.media_metadata_id = mm.id),
+                '[]'::json
+              ) as actors
+       FROM media_metadata mm
+       WHERE mm.tmdb_id = $1 AND mm.media_type = $2`,
       [tmdbId, mediaType]
     );
     if (rows.length > 0) {
       console.log(`[Media Metadata] HIT: ${mediaType}/${tmdbId}`);
-      return rows[0].data;
+      return rows[0];
     }
     return null;
   } catch (err) {
@@ -86,19 +105,86 @@ async function getMediaMetadata(tmdbId, mediaType) {
 
 /**
  * Сохранить метаданные фильма/сериала в БД (навсегда)
+ * Плюс нормализованные поля: год, жанры, режиссёры, актёры
  */
 async function saveMediaMetadata(tmdbId, mediaType, data) {
+  const client = await db.connect();
   try {
-    await db.query(
-      `INSERT INTO media_metadata (tmdb_id, media_type, data)
-       VALUES ($1, $2, $3)
+    await client.query('BEGIN');
+
+    // Основные данные
+    const releaseYear = data.release_date
+      ? parseInt(data.release_date.slice(0, 4))
+      : data.first_air_date
+        ? parseInt(data.first_air_date.slice(0, 4))
+        : null;
+
+    const { rows } = await client.query(
+      `INSERT INTO media_metadata (tmdb_id, media_type, data, release_year, title, poster_path, overview)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (tmdb_id, media_type)
-       DO UPDATE SET data = $3, fetched_at = CURRENT_TIMESTAMP`,
-      [tmdbId, mediaType, JSON.stringify(data)]
+       DO UPDATE SET data = $3, fetched_at = CURRENT_TIMESTAMP,
+                     release_year = $4, title = $5, poster_path = $6, overview = $7
+       RETURNING id`,
+      [tmdbId, mediaType, JSON.stringify(data), releaseYear, data.title || data.name || null, data.poster_path || null, data.overview || null]
     );
-    console.log(`[Media Metadata] SET: ${mediaType}/${tmdbId}`);
+    const metaId = rows[0].id;
+
+    // Жанры
+    if (data.genres && data.genres.length > 0) {
+      for (const g of data.genres) {
+        await client.query(
+          `INSERT INTO genres (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = $2`,
+          [g.id, g.name]
+        );
+        await client.query(
+          `INSERT INTO media_genres (media_metadata_id, genre_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [metaId, g.id]
+        );
+      }
+    }
+
+    // Удаляем старые связи режиссёров и актёров (при обновлении)
+    await client.query('DELETE FROM media_directors WHERE media_metadata_id = $1', [metaId]);
+    await client.query('DELETE FROM media_actors WHERE media_metadata_id = $1', [metaId]);
+
+    // Режиссёры (из credits.crew, job === 'Director')
+    const crew = data.credits?.crew || [];
+    const directors = crew.filter(c => c.job === 'Director');
+    for (const d of directors) {
+      await client.query(
+        `INSERT INTO media_directors (media_metadata_id, person_id, name) VALUES ($1, $2, $3)`,
+        [metaId, d.id, d.name]
+      );
+    }
+
+    // Создатели сериалов (created_by) — тоже в media_directors
+    if (mediaType === 'tv' && data.created_by && data.created_by.length > 0) {
+      for (const c of data.created_by) {
+        await client.query(
+          `INSERT INTO media_directors (media_metadata_id, person_id, name) VALUES ($1, $2, $3)`,
+          [metaId, c.id, c.name]
+        );
+      }
+    }
+
+    // Актёры (из credits.cast, берём топ-15 по order)
+    const cast = (data.credits?.cast || []).slice(0, 15);
+    for (const a of cast) {
+      await client.query(
+        `INSERT INTO media_actors (media_metadata_id, person_id, name, character_name, sort_order)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [metaId, a.id, a.name, a.character || null, a.order ?? 0]
+      );
+    }
+
+    await client.query('COMMIT');
+    console.log(`[Media Metadata] SET: ${mediaType}/${tmdbId} (year=${releaseYear}, genres=${data.genres?.length || 0}, directors=${directors.length}, actors=${cast.length})`);
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('[Media Metadata] Ошибка записи:', err.message);
+  } finally {
+    client.release();
   }
 }
 
@@ -272,16 +358,16 @@ async function getTopRatedTv() {
   return tmdbRequest('/tv/top_rated', { page: 1 }, { ttlHours: 168 });
 }
 
-// Детали фильма
+// Детали фильма (возвращает raw TMDB JSON — совместимость с фронтом)
 async function getMovieDetails(id) {
-  // 1. Проверяем БД — если есть, отдаём сразу
+  // 1. Проверяем БД — если есть, отдаём data (JSONB)
   const cached = await getMediaMetadata(id, 'movie');
-  if (cached) return cached;
+  if (cached) return cached.data;
 
   // 2. Нет в БД — качаем из TMDB
   try {
     const data = await tmdbRequest(`/movie/${id}`, { append_to_response: 'credits,similar,videos' });
-    // Сохраняем навсегда
+    // Сохраняем навсегда (включая нормализованные поля)
     saveMediaMetadata(id, 'movie', data).catch(() => {});
     return data;
   } catch (err) {
@@ -292,16 +378,16 @@ async function getMovieDetails(id) {
   }
 }
 
-// Детали сериала
+// Детали сериала (возвращает raw TMDB JSON — совместимость с фронтом)
 async function getTvDetails(id) {
-  // 1. Проверяем БД — если есть, отдаём сразу
+  // 1. Проверяем БД — если есть, отдаём data (JSONB)
   const cached = await getMediaMetadata(id, 'tv');
-  if (cached) return cached;
+  if (cached) return cached.data;
 
   // 2. Нет в БД — качаем из TMDB
   try {
     const data = await tmdbRequest(`/tv/${id}`, { append_to_response: 'credits,similar,videos' });
-    // Сохраняем навсегда
+    // Сохраняем навсегда (включая нормализованные поля)
     saveMediaMetadata(id, 'tv', data).catch(() => {});
     return data;
   } catch (err) {

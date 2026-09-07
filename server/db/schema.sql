@@ -79,7 +79,47 @@ CREATE TABLE IF NOT EXISTS media_metadata (
   media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv')),
   data JSONB NOT NULL,
   fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  release_year INTEGER,
+  title TEXT,
+  poster_path TEXT,
+  overview TEXT,
   UNIQUE(tmdb_id, media_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_metadata_lookup ON media_metadata(tmdb_id, media_type);
+CREATE INDEX IF NOT EXISTS idx_media_metadata_year ON media_metadata(release_year);
+CREATE INDEX IF NOT EXISTS idx_media_metadata_title ON media_metadata(title);
+
+-- Жанры (справочник)
+CREATE TABLE IF NOT EXISTS genres (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+
+-- Связь фильм/сериал ↔ жанры (M:N)
+CREATE TABLE IF NOT EXISTS media_genres (
+  media_metadata_id INTEGER NOT NULL REFERENCES media_metadata(id) ON DELETE CASCADE,
+  genre_id INTEGER NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
+  PRIMARY KEY (media_metadata_id, genre_id)
+);
+CREATE INDEX IF NOT EXISTS idx_media_genres_metadata ON media_genres(media_metadata_id);
+
+-- Режиссёры
+CREATE TABLE IF NOT EXISTS media_directors (
+  id SERIAL PRIMARY KEY,
+  media_metadata_id INTEGER NOT NULL REFERENCES media_metadata(id) ON DELETE CASCADE,
+  person_id INTEGER NOT NULL,
+  name TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_directors_metadata ON media_directors(media_metadata_id);
+
+-- Актёры
+CREATE TABLE IF NOT EXISTS media_actors (
+  id SERIAL PRIMARY KEY,
+  media_metadata_id INTEGER NOT NULL REFERENCES media_metadata(id) ON DELETE CASCADE,
+  person_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  character_name TEXT,
+  sort_order INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_media_actors_metadata ON media_actors(media_metadata_id);

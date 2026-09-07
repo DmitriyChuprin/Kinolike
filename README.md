@@ -11,15 +11,17 @@
 - **Поиск** — с автодополнением через TMDB
 - **Профиль** — статистика, настройки, экспорт/импорт
 - **Тёмная/светлая тема**
+- **Детальная информация** — год, жанры, режиссёры, актёры для каждого фильма/сериала
 
 ## Технологии
 
 - **Frontend**: Vanilla HTML5 + CSS3 + JS (SPA hash-based)
 - **Backend**: Node.js 20 + Express 4
-- **БД**: SQLite3 (better-sqlite3)
+- **БД**: PostgreSQL 16
 - **AI**: OpenAI-compatible API
-- **TMDB**: API v3 через backend proxy
-- **Docker**: Один контейнер, Express раздаёт статику
+- **TMDB**: API v3 через backend proxy (с кэшированием в БД)
+- **Прокси**: SOCKS5/VLESS для обхода блокировок TMDB в России
+- **Docker**: Docker Compose (app + PostgreSQL)
 
 ## Запуск
 
@@ -47,7 +49,6 @@ npm run dev
 | Переменная | Описание |
 |-----------|----------|
 | PORT | Порт сервера (по умолчанию 3000) |
-| DB_PATH | Путь к файлу SQLite |
 | TMDB_API_KEY | API ключ TMDB |
 | JWT_SECRET | Секрет для JWT токенов |
 | AI_BASE_URL | URL OpenAI-compatible API |
@@ -57,6 +58,13 @@ npm run dev
 | TMDB_PROXY_TYPE | Тип прокси (socks5) |
 | TMDB_PROXY_HOST | Хост прокси |
 | TMDB_PROXY_PORT | Порт прокси |
+| TMDB_PROXY_USERNAME | Имя пользователя прокси |
+| TMDB_PROXY_PASSWORD | Пароль прокси |
+| PGHOST | Хост PostgreSQL |
+| PGPORT | Порт PostgreSQL |
+| PGDATABASE | Имя базы данных |
+| PGUSER | Пользователь PostgreSQL |
+| PGPASSWORD | Пароль PostgreSQL |
 
 ## Структура проекта
 
@@ -71,9 +79,55 @@ kinolike/
 │   ├── routes/       # API маршруты
 │   ├── services/     # TMDB, AI сервисы
 │   ├── models/       # Модели данных
-│   ├── db/           # SQLite
+│   ├── db/           # PostgreSQL + миграции
 │   └── middleware/    # JWT auth
 ├── docker-compose.yml
 ├── Dockerfile
 └── .env.example
 ```
+
+## База данных
+
+### Таблицы
+
+- **users** — пользователи
+- **user_lists** — списки фильмов/сериалов (хочу посмотреть, смотрю, просмотрено и т.д.)
+- **media_metadata** — метаданные фильмов/сериалов (название, год, постер, описание)
+- **genres** — справочник жанров
+- **media_genres** — связь фильм/сериал ↔ жанры
+- **media_directors** — режиссёры и создатели сериалов
+- **media_actors** — актёры с персонажами
+- **recommendations** — кэш рекомендаций ИИ
+- **streaming_links** — ссылки на стриминг (TorrServer/Jellyfin)
+- **tmdb_cache** — кэш ответов TMDB API
+
+### Миграции
+
+Миграции автоматически применяются при старте сервера. Файлы миграций находятся в `server/db/migrations/`.
+
+## Прокси для TMDB
+
+В России `api.themoviedb.org` заблокирован через DNS-отравление (возвращает `127.0.0.1`). Для обхода используется SOCKS5 прокси:
+
+### Настройка прокси
+
+1. Установите xray-core
+2. Создайте конфиг клиента (см. `~/bin/xray-client.json`)
+3. Запустите прокси: `~/bin/xray run -c ~/bin/xray-client.json`
+4. В `.env` установите:
+   ```
+   TMDB_PROXY_ENABLED=true
+   TMDB_PROXY_TYPE=socks5
+   TMDB_PROXY_HOST=172.18.0.1
+   TMDB_PROXY_PORT=1080
+   ```
+
+### Архитектура прокси
+
+```
+kinolike (Docker) → SOCKS5 → xray клиент → VLESS → VPS3 → интернет → api.themoviedb.org
+```
+
+## Лицензия
+
+MIT
