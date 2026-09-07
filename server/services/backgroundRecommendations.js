@@ -20,6 +20,12 @@ async function generate_candidates(profile, excluded) {
   const genres = [...profile.features.genres.entries()].filter(([, value]) => value > 0).sort((a,b) => b[1] - a[1]).slice(0, 3);
   const discovered = await Promise.all(genres.map(([genre]) => tmdb.discoverMovies({ with_genres: genre, sort_by: 'popularity.desc', page: 1 }).catch(() => ({ results: [] }))));
   discovered.forEach(result => (result.results || []).forEach(add));
+  // Discover by top keywords from user profile
+  const keywords = [...profile.features.keywords.entries()].filter(([, value]) => value > 0).sort((a,b) => b[1] - a[1]).slice(0, 3);
+  if (keywords.length) {
+    const kwDiscovered = await Promise.all(keywords.map(([kwId]) => tmdb.discoverMovies({ with_keywords: kwId, sort_by: 'popularity.desc', page: 1 }).catch(() => ({ results: [] }))));
+    kwDiscovered.forEach(result => (result.results || []).forEach(add));
+  }
   if (found.size < 20) (await tmdb.getTopRatedMovies().catch(() => ({ results: [] }))).results.forEach(add);
   return [...found.values()].slice(0, config.CANDIDATE_LIMIT);
 }

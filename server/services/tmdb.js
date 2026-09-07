@@ -366,13 +366,13 @@ async function getMovieDetails(id) {
 
   // 2. Нет в БД — качаем из TMDB
   try {
-    const data = await tmdbRequest(`/movie/${id}`, { append_to_response: 'credits,similar,videos' });
+    const data = await tmdbRequest(`/movie/${id}`, { append_to_response: 'credits,similar,videos,keywords' });
     // Сохраняем навсегда (включая нормализованные поля)
     saveMediaMetadata(id, 'movie', data).catch(() => {});
     return data;
   } catch (err) {
     // TMDB недоступен — пробуем отдать хоть что-то из кэша API
-    const fallback = await getFromCache(`/movie/${id}`, { append_to_response: 'credits,similar,videos' });
+    const fallback = await getFromCache(`/movie/${id}`, { append_to_response: 'credits,similar,videos,keywords' });
     if (fallback) return fallback;
     throw err;
   }
@@ -386,13 +386,13 @@ async function getTvDetails(id) {
 
   // 2. Нет в БД — качаем из TMDB
   try {
-    const data = await tmdbRequest(`/tv/${id}`, { append_to_response: 'credits,similar,videos' });
+    const data = await tmdbRequest(`/tv/${id}`, { append_to_response: 'credits,similar,videos,keywords' });
     // Сохраняем навсегда (включая нормализованные поля)
     saveMediaMetadata(id, 'tv', data).catch(() => {});
     return data;
   } catch (err) {
     // TMDB недоступен — пробуем отдать хоть что-то из кэша API
-    const fallback = await getFromCache(`/tv/${id}`, { append_to_response: 'credits,similar,videos' });
+    const fallback = await getFromCache(`/tv/${id}`, { append_to_response: 'credits,similar,videos,keywords' });
     if (fallback) return fallback;
     throw err;
   }
