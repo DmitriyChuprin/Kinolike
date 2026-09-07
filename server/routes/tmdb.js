@@ -29,8 +29,8 @@ if (process.env.TMDB_PROXY_ENABLED === 'true') {
   const user = process.env.TMDB_PROXY_USERNAME;
   const pass = process.env.TMDB_PROXY_PASSWORD;
   if (type === 'socks5') {
-    let proxyUrl = `socks5://${host}:${port}`;
-    if (user && pass) proxyUrl = `socks5://${user}:${pass}@${host}:${port}`;
+    let proxyUrl = `socks5h://${host}:${port}`;
+    if (user && pass) proxyUrl = `socks5h://${user}:${pass}@${host}:${port}`;
     imageAgent = new SocksProxyAgent(proxyUrl);
   }
 }
