@@ -266,6 +266,19 @@ const API = {
       return API.post('/api/vkvideo/search', { title, year });
     },
   },
+
+  // ===== Watch Positions (продолжить просмотр) =====
+  watchPositions: {
+    async get() {
+      return API.get('/api/watch-positions');
+    },
+    async save(tmdb_id, media_type, position, duration, title, poster_path) {
+      return API.post('/api/watch-positions', { tmdb_id, media_type, position, duration, title, poster_path });
+    },
+    async remove(tmdbId, mediaType) {
+      return API.delete(`/api/watch-positions/${tmdbId}/${mediaType}`);
+    },
+  },
 };
 
 // Утилиты для изображений (через серверный прокси)

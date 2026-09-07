@@ -20,10 +20,12 @@ const Movies = {
       // Персональные блоки (для авторизованных)
       let wantItems = [];
       let favCollection = null;
+      let continueWatching = [];
       if (App.currentUser) {
-        const [wantData, favData] = await Promise.all([
+        const [wantData, favData, positionsData] = await Promise.all([
           API.lists.get({ status: 'want_to_watch' }).catch(() => ({ items: [] })),
           API.recommendations.favoriteGenre().catch(() => ({ collection: null })),
+          API.watchPositions.get().catch(() => ({ items: [] })),
         ]);
         wantItems = (wantData.items || [])
           .map(item => this.mapListItem(item))
@@ -31,6 +33,14 @@ const Movies = {
         favCollection = favData.collection && favData.collection.items.length
           ? favData.collection
           : null;
+        continueWatching = (positionsData.items || []).map(pos => ({
+          id: pos.tmdb_id,
+          media_type: pos.media_type,
+          title: pos.title,
+          poster_path: pos.poster_path,
+          _position: pos.position,
+          _duration: pos.duration,
+        }));
       }
 
       // Слайдер — тренды недели
@@ -55,6 +65,8 @@ const Movies = {
 
         <!-- Подборки -->
         <div id="catalogContent">
+          ${this.renderContinueWatching(continueWatching)}
+
           ${this.renderRailSection('Из вашего списка', wantItems, genres)}
 
           ${favCollection
@@ -131,6 +143,47 @@ const Movies = {
           </div>
           ${item.overview ? `<div class="slider-desc">${UI.escapeHtml(item.overview)}</div>` : ''}
           <button class="btn btn-primary" onclick="window.location.hash='#/movie/${item.id}'">Подробнее</button>
+        </div>
+      </div>
+    `;
+  },
+
+  // Секция «Продолжить просмотр»
+  renderContinueWatching(items) {
+    if (!items.length) return '';
+    return `
+      <div class="section">
+        <div class="section-header">
+          <h2 class="section-title">Продолжить просмотр</h2>
+        </div>
+        <div class="rail">
+          <div class="rail-track">
+            ${items.map(item => {
+              const progress = item._duration > 0 ? Math.min((item._position / item._duration) * 100, 95) : 0;
+              const timeLeft = item._duration > 0 ? Math.max(item._duration - item._position, 0) : 0;
+              const h = Math.floor(timeLeft / 3600);
+              const m = Math.floor((timeLeft % 3600) / 60);
+              const remaining = h > 0 ? `${h} ч ${m} мин` : `${m} мин`;
+              return `
+                <div class="movie-card" data-id="${item.id}" data-type="${item.media_type}" style="position:relative">
+                  <div class="movie-card-poster">
+                    ${item.poster_path
+                      ? `<img src="${IMG.poster(item.poster_path)}" alt="${UI.escapeHtml(item.title || '')}">`
+                      : `<div class="no-poster">🎬</div>`
+                    }
+                    <div class="progress-bar" style="position:absolute;bottom:0;left:0;right:0;height:3px;background:rgba(255,255,255,0.2)">
+                      <div style="height:100%;width:${progress}%;background:var(--primary);border-radius:0 2px 2px 0"></div>
+                    </div>
+                  </div>
+                  <div class="movie-card-info">
+                    <div class="movie-card-title">${UI.escapeHtml(item.title || '')}</div>
+                    <div style="font-size:0.75rem;color:var(--text-secondary)">Осталось ${remaining}</div>
+                  </div>
+                </div>`;
+            }).join('')}
+          </div>
+          <button class="rail-btn prev" aria-label="Назад">‹</button>
+          <button class="rail-btn next" aria-label="Вперёд">›</button>
         </div>
       </div>
     `;

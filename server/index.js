@@ -46,6 +46,7 @@ app.use('/api/youtube', require('./routes/youtube'));
 app.use('/api/streaming', require('./routes/streaming'));
 app.use('/api/phantom', require('./routes/phantom'));
 app.use('/api/vkvideo', require('./routes/vkvideo'));
+app.use('/api/watch-positions', require('./routes/watch_positions'));
 
 // SPA fallback
 app.get('*', (req, res) => {

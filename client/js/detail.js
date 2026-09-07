@@ -11,28 +11,36 @@ const VideoPlayer = {
     return 'vp_' + Math.abs(hash).toString(36);
   },
 
-  open(url, title) {
+  open(url, title, { tmdbId, mediaType, posterPath } = {}) {
     const overlay = document.getElementById('videoPlayerOverlay');
     const video = document.getElementById('videoPlayerElement');
     const titleEl = document.getElementById('videoPlayerTitle');
 
     this._stopTracking();
     this._lastKey = this._key(url, title);
+    this._tmdbId = tmdbId || null;
+    this._mediaType = mediaType || null;
+    this._title = title || '';
+    this._posterPath = posterPath || '';
     titleEl.textContent = title || '';
     video.src = url;
     video.load();
 
-    // Restore saved position
-    const savedPos = localStorage.getItem(this._key(url, title));
+    // Restore: try localStorage first, then server
+    const localKey = this._key(url, title);
+    const savedPos = localStorage.getItem(localKey);
+
     if (savedPos && parseFloat(savedPos) > 1) {
-      const restorePosition = parseFloat(savedPos);
-      const resumeNote = document.createElement('span');
-      resumeNote.className = 'video-resume-note';
-      resumeNote.textContent = ` ▶ с ${this._fmtTime(restorePosition)}`;
-      titleEl.appendChild(resumeNote);
-      video.addEventListener('loadedmetadata', () => {
-        video.currentTime = Math.min(restorePosition, video.duration || restorePosition);
-      }, { once: true });
+      this._applyRestore(video, titleEl, parseFloat(savedPos));
+    } else if (tmdbId && mediaType) {
+      // Fetch from server (async)
+      API.watchPositions.get().then(data => {
+        const items = data.items || [];
+        const match = items.find(i => i.tmdb_id == tmdbId && i.media_type === mediaType);
+        if (match && match.position > 1) {
+          this._applyRestore(video, titleEl, match.position);
+        }
+      }).catch(() => {});
     }
 
     overlay.classList.add('active');
@@ -40,14 +48,24 @@ const VideoPlayer = {
 
     // Save on pause and periodically
     this._saveInterval = setInterval(() => {
-      this._savePosition(video, this._key(url, title));
+      this._savePosition(video, this._lastKey);
     }, 5000);
 
     // Also save on pause
     this._pauseHandler = () => {
-      this._savePosition(video, this._key(url, title));
+      this._savePosition(video, this._lastKey);
     };
     video.addEventListener('pause', this._pauseHandler);
+  },
+
+  _applyRestore(video, titleEl, position) {
+    const resumeNote = document.createElement('span');
+    resumeNote.className = 'video-resume-note';
+    resumeNote.textContent = ` ▶ с ${this._fmtTime(position)}`;
+    titleEl.appendChild(resumeNote);
+    video.addEventListener('loadedmetadata', () => {
+      video.currentTime = Math.min(position, video.duration || position);
+    }, { once: true });
   },
 
   close() {
@@ -70,13 +88,23 @@ const VideoPlayer = {
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const sec = Math.floor(s % 60);
-    return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` : `${m}:${String(sec).padStart(2,'0')}`;
+    return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` : `${m}:${String(sec)}`;
   },
 
   _savePosition(video, key) {
     const position = Number(video?.currentTime);
     if (key && Number.isFinite(position) && position > 0) {
+      // localStorage (fallback)
       localStorage.setItem(key, String(position));
+
+      // Server (if we have tmdb context)
+      if (this._tmdbId && this._mediaType) {
+        const duration = Number(video?.duration) || 0;
+        API.watchPositions.save(
+          this._tmdbId, this._mediaType, position, duration,
+          this._title, this._posterPath
+        ).catch(() => {}); // fire-and-forget
+      }
     }
   },
 
@@ -238,7 +266,7 @@ const Detail = {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M8 5v14l11-7z"/>
                 </svg>
-                Смотреть онлайн
+                Смотреть в VK
               </button>
 
               ${jellyfinUrl ? `
@@ -305,7 +333,7 @@ const Detail = {
       
       this.initStatusButtonEvents(type, id, title);
       this.initAddButton();
-      this.initPhantomButton(type, id, title, originalTitle, year);
+      this.initPhantomButton(type, id, title, originalTitle, year, details.poster_path);
       this.initCastClickEvents();
       this.initJellyfinRefreshButton(type, id);
       
@@ -387,8 +415,8 @@ const Detail = {
     });
   },
 
-  // ===== Кнопка "Смотреть онлайн" (VkMovie) =====
-  initPhantomButton(type, id, title, originalTitle, year) {
+  // ===== Кнопка "Смотреть в VK" (VkMovie) =====
+  initPhantomButton(type, id, title, originalTitle, year, posterPath) {
     const btn = document.getElementById('phantomWatchBtn');
     if (!btn) return;
 
@@ -409,19 +437,19 @@ const Detail = {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
               <path d="M8 5v14l11-7z"/>
             </svg>
-            Смотреть онлайн
+            Смотреть в VK
           `;
           return;
         }
 
-        this.openVkMoviePicker(result.results, title || originalTitle);
+        this.openVkMoviePicker(result.results, title || originalTitle, { tmdbId: id, mediaType: type, posterPath });
         // Restore button after picker shown
         btn.disabled = false;
         btn.innerHTML = `
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
             <path d="M8 5v14l11-7z"/>
           </svg>
-          Смотреть онлайн
+          Смотреть в VK
         `;
       } catch (err) {
         console.error('[VkMovie] search error:', err);
@@ -431,7 +459,7 @@ const Detail = {
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
             <path d="M8 5v14l11-7z"/>
           </svg>
-          Смотреть онлайн
+          Смотреть в VK
         `;
       }
     });
@@ -440,7 +468,7 @@ const Detail = {
   /**
    * Show video picker modal for VkMovie results
    */
-  openVkMoviePicker(results, displayTitle) {
+  openVkMoviePicker(results, displayTitle, ctx = {}) {
     const items = results.map(r => {
       const quals = r.qualities.map(q => q.quality).join(', ');
       return `
@@ -471,7 +499,11 @@ const Detail = {
         const title = el.dataset.title;
         UI.modal.close();
         const proxyUrl = `/api/vkvideo/proxy?url=${encodeURIComponent(rawUrl)}`;
-        VideoPlayer.open(proxyUrl, title);
+        VideoPlayer.open(proxyUrl, title, {
+          tmdbId: ctx.tmdbId,
+          mediaType: ctx.mediaType,
+          posterPath: ctx.posterPath,
+        });
       });
     });
   },
