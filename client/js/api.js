@@ -142,6 +142,9 @@ const API = {
       Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== '') qs.set(k, v); });
       return API.get(`/api/recommendations/discover?${qs.toString()}`);
     },
+    async search(query) {
+      return API.post('/api/recommendations/search', { query });
+    },
   },
 
   // ===== Stats =====

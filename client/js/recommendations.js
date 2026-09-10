@@ -1,4 +1,4 @@
-// Рекомендации — фильтры + жанровые подборки (AI временно отключён)
+// Рекомендации — жанровые подборки + фильтры Discover
 const Recommendations = {
   filters: {
     media_type: '',
@@ -14,9 +14,6 @@ const Recommendations = {
   totalPages: 0,
 
   async render() {
-    // Очистить poll-таймер предыдущей страницы
-    if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
-
     if (!App.currentUser) {
       const app = document.getElementById('app');
       UI.emptyState(app, 'Войдите в аккаунт', 'Рекомендации доступны для авторизованных пользователей');
@@ -28,15 +25,27 @@ const Recommendations = {
     app.innerHTML = `
       <h1 class="page-title">Рекомендации</h1>
 
-      <section class="personal-recommendations" id="personalRecommendations">
-        <div class="section-header">
-          <h2 class="section-title">Персонально для вас</h2>
-          <button class="btn btn-secondary btn-sm" id="refreshPersonalRecommendations">Обновить</button>
+      <!-- AI Поиск -->
+      <div class="ai-search-section">
+        <div class="ai-search-bar">
+          <input type="text" class="ai-search-input" id="aiSearchInput"
+                 placeholder="Что хочешь посмотреть?"
+                 maxlength="500">
+          <button class="ai-search-btn" id="aiSearchBtn">Найти</button>
         </div>
-        <div class="movies-grid" id="personalRecommendationsGrid">
-          <div class="loading-spinner"><div class="spinner"></div></div>
+        <div class="ai-search-examples">
+          <span class="ai-search-example" data-q="Посоветуй что-нибудь посмотреть на вечер, романтическую комедию">Романтическая комедия на вечер</span>
+          <span class="ai-search-example" data-q="Хочу хороший фантастический фильм на 2 часа">Фантастика на 2 часа</span>
+          <span class="ai-search-example" data-q="Что-нибудь похожее на Интерстеллар">Похожее на Интерстеллар</span>
+          <span class="ai-search-example" data-q="Посоветуй напряжённый триллер без ужасов">Триллер без ужасов</span>
+          <span class="ai-search-example" data-q="Хочу лёгкий фильм, чтобы посмотреть вместе с девушкой">Лёгкий фильм вдвоём</span>
+          <span class="ai-search-example" data-q="Что-нибудь умное и атмосферное, но не слишком тяжёлое">Умное и атмосферное</span>
+          <span class="ai-search-example" data-q="Посоветуй фантастику последних пяти лет">Фантастика 2021–2026</span>
+          <span class="ai-search-example" data-q="Хочу фильм с неожиданной концовкой">С неожиданной концовкой</span>
         </div>
-      </section>
+        <p class="ai-search-info">AI подберёт фильмы из базы сайта по вашему вкусу</p>
+        <div id="aiSearchStatus"></div>
+      </div>
 
       <!-- Фильтры -->
       <div class="recs-filters">
@@ -90,61 +99,151 @@ const Recommendations = {
         </div>
       </div>
 
-      <!-- Жанровые подборки (внизу) -->
+      <!-- Жанровые подборки (персональные) -->
       <div id="recsGenres" style="margin-top:40px">
         <div class="loading-spinner">
           <div class="spinner"></div>
         </div>
-        <p style="text-align:center;color:var(--text-secondary)">Собираем подборки по жанрам...</p>
+        <p style="text-align:center;color:var(--text-secondary)">Подбираем персональные рекомендации...</p>
       </div>
     `;
 
     this.initFilters();
+    this.initAISearch();
     this.populateDropdowns();
-    document.getElementById("refreshPersonalRecommendations")?.addEventListener("click", () => this.loadPersonalRecommendations(true));
-    await Promise.all([this.loadPersonalRecommendations(), this.loadGenreCollections()]);
+    await this.loadGenreCollections();
   },
 
-  // ===== Персональные рекомендации =====
-  async loadPersonalRecommendations(refresh = false) {
-    const grid = document.getElementById("personalRecommendationsGrid");
-    const button = document.getElementById("refreshPersonalRecommendations");
-    if (!grid) return;
-    if (refresh) {
-      grid.innerHTML = "<div class=\"loading-spinner\"><div class=\"spinner\"></div></div>";
-      if (button) button.disabled = true;
+  // ===== AI Search =====
+  _searchAbort: null,
+
+  initAISearch() {
+    const input = document.getElementById('aiSearchInput');
+    const btn = document.getElementById('aiSearchBtn');
+    if (!input || !btn) return;
+
+    const doSearch = () => this.searchAI();
+
+    btn.addEventListener('click', doSearch);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doSearch();
+    });
+
+    // Example chips
+    document.querySelectorAll('.ai-search-example').forEach(chip => {
+      chip.addEventListener('click', () => {
+        input.value = chip.dataset.q;
+        doSearch();
+      });
+    });
+  },
+
+  async searchAI() {
+    const input = document.getElementById('aiSearchInput');
+    const status = document.getElementById('aiSearchStatus');
+    const query = (input?.value || '').trim();
+
+    if (!query) {
+      status.innerHTML = '<p style="color:var(--accent);font-size:0.85rem;margin-top:8px">Введите запрос</p>';
+      return;
     }
+
+    const btn = document.getElementById('aiSearchBtn');
+    btn.disabled = true;
+    btn.textContent = 'Поиск...';
+    status.innerHTML = `
+      <div class="ai-search-loading">
+        <div class="spinner"></div>
+        <span class="ai-search-loading-text">AI анализирует запрос и ищет подходящие фильмы...</span>
+      </div>`;
+
     try {
-      const data = await API.recommendations.get(refresh);
-      const rawItems = data.items || data.recommendations || [];
-      // Развернуть details на верхний уровень для movieCardWithGenres
-      const items = rawItems.map(item => ({
-        ...item,
-        ...(item.details || {}),
-      }));
-
-      // Если генерация в фоне — показываем спиннер и poll
-      if (data.pending && !items.length) {
-        grid.innerHTML = "<div class=\"loading-spinner\"><div class=\"spinner\"></div></div><p class=\"recommendations-hint\">Рекомендации рассчитываются...</p>";
-        this._pollTimer = setTimeout(() => this.loadPersonalRecommendations(), 3000);
-        return;
-      }
-
-      // Остановить poll если был
-      if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
-
-      if (!items.length) {
-        grid.innerHTML = "<p class=\"recommendations-hint\">" + UI.escapeHtml(data.message || "Оцените минимум два просмотренных фильма, чтобы получить персональные рекомендации.") + "</p>";
-        return;
-      }
-      grid.innerHTML = items.map(item => UI.movieCardWithGenres(item, App.getAllGenres())).join("");
-      this.initGridEvents(grid);
+      const data = await API.recommendations.search(query);
+      this.renderSearchResults(data, status);
     } catch (err) {
-      console.error("Ошибка персональных рекомендаций:", err);
-      grid.innerHTML = "<p class=\"recommendations-hint\">Не удалось загрузить персональные рекомендации: " + UI.escapeHtml(err.message) + "</p>";
+      console.error('AI search error:', err);
+      status.innerHTML = `<p style="color:#e74c3c;font-size:0.85rem;margin-top:8px">${err.message || 'Ошибка поиска'}</p>`;
     } finally {
-      if (button) button.disabled = false;
+      btn.disabled = false;
+      btn.textContent = 'Найти';
     }
+  },
+
+  renderSearchResults(data, container) {
+    const { recommendations = [], query: searchQuery, params, refMovie } = data;
+    const results = recommendations;
+    const genres = App.getAllGenres();
+
+    if (!results || results.length === 0) {
+      container.innerHTML = `
+        <div class="ai-search-empty">
+          <div class="ai-search-empty-icon">🎬</div>
+          <div class="ai-search-empty-text">Ничего не найдено. Попробуйте переформулировать запрос.</div>
+        </div>`;
+      return;
+    }
+
+    // Build result cards
+    const cards = results.map(item => {
+      const year = item.release_year || (item.details?.release_date || '').slice(0, 4);
+      const rating = item.vote_average ? Number(item.vote_average).toFixed(1) : '—';
+      const scoreClass = item.score >= 70 ? 'high' : item.score >= 45 ? 'medium' : 'low';
+      const poster = item.poster_path ? IMG.poster(item.poster_path, 'w342') : '';
+      const typeLabel = item.media_type === 'tv' ? 'Сериал' : 'Фильм';
+
+      return `
+        <div class="movie-card" data-id="${item.tmdb_id}" data-type="${item.media_type}">
+          <div class="movie-card-poster" style="position:relative">
+            ${poster
+              ? `<img src="${poster}" alt="${item.title || ''}" loading="lazy">`
+              : `<div class="no-poster">${item.title || 'Нет постера'}</div>`}
+            <span class="ai-score-badge ${scoreClass}">${item.score}</span>
+          </div>
+          <div class="movie-card-info">
+            <div class="movie-card-title">${item.title || 'Без названия'}</div>
+            <div class="movie-card-meta">
+              <span>${year || '—'}</span>
+              <span class="rating-${item.vote_average >= 7 ? 'high' : item.vote_average >= 5 ? 'mid' : 'low'}">${rating}</span>
+              <span style="opacity:0.6;font-size:0.72rem">${typeLabel}</span>
+            </div>
+            ${item.reason ? `<div class="ai-card-reason">${item.reason}</div>` : ''}
+          </div>
+          <div class="movie-card-actions">
+            <button class="btn btn-sm status-btn" data-action="add" data-tmdb="${item.tmdb_id}" data-type="${item.media_type}">+ Добавить</button>
+          </div>
+        </div>`;
+    }).join('');
+
+    const subtitleParts = [];
+    if (refMovie) subtitleParts.push(`Похоже на «${refMovie}»`);
+    if (params?.genres?.length) subtitleParts.push(`жанры: ${params.genres.length}`);
+
+    container.innerHTML = `
+      <div class="ai-search-results">
+        <div class="ai-search-results-title">Найдено: ${results.length} ${this._plural(results.length, 'результат', 'результатов', 'результата')}</div>
+        ${subtitleParts.length ? `<div class="ai-search-results-subtitle">${subtitleParts.join(' · ')}</div>` : ''}
+        <div class="movies-grid">${cards}</div>
+      </div>`;
+
+    // Init events
+    Movies.initStatusButtons();
+    container.querySelectorAll('.movie-card').forEach(card => {
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.status-btn')) return;
+        const id = card.dataset.id;
+        const type = card.dataset.type;
+        window.location.hash = `#/${type}/${id}`;
+      });
+    });
+  },
+
+  _plural(n, one, many, few) {
+    const abs = Math.abs(n) % 100;
+    const lastDigit = abs % 10;
+    if (abs > 10 && abs < 20) return many;
+    if (lastDigit > 1 && lastDigit < 5) return few;
+    if (lastDigit === 1) return one;
+    return many;
   },
 
   // ===== Инициализация фильтров =====

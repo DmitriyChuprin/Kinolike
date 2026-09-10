@@ -36,7 +36,7 @@ function movie_data(item) {
 }
 
 function build_user_profile(watched) {
-  const rated = watched.map(movie_data).filter(movie => config.RATING_WEIGHTS[movie.rating] !== undefined && movie.media_type === 'movie');
+  const rated = watched.map(movie_data).filter(movie => config.RATING_WEIGHTS[movie.rating] !== undefined);
   const features = ['genres', 'directors', 'actors', 'countries', 'languages', 'eras', 'overview', 'keywords'];
   const totals = Object.fromEntries(features.map(feature => [feature, new Map()]));
   const names = Object.fromEntries(features.map(feature => [feature, new Map()]));
@@ -150,7 +150,7 @@ function generate_recommendations({ watched, candidates, limit = config.RESULT_L
   const scored = candidates.map(movie_data).filter(candidate => candidate.movie_id && candidate.genres.size && candidate.vote_count >= config.MIN_VOTE_COUNT)
     .filter(candidate => !seen.has(candidate.movie_id) && seen.add(candidate.movie_id))
     .map(candidate => ({ ...calculate_movie_score(candidate, profile), ...reason_for(candidate, profile) }));
-  return { profile, recommendations: apply_diversity(scored, limit).map(item => ({ tmdb_id: item.candidate.movie_id, movie_id: item.candidate.movie_id, media_type: 'movie', title: item.candidate.title, score: item.score, reason: item.reason, matched_movies: item.matched_movies })) };
+  return { profile, recommendations: apply_diversity(scored, limit).map(item => ({ tmdb_id: item.candidate.movie_id, movie_id: item.candidate.movie_id, media_type: item.candidate.media_type || 'movie', title: item.candidate.title, score: item.score, reason: item.reason, matched_movies: item.matched_movies })) };
 }
 
-module.exports = { movie_data, build_user_profile, calculate_similarity, calculate_movie_score, apply_diversity, generate_recommendations };
+module.exports = { movie_data, build_user_profile, calculate_similarity, calculate_movie_score, apply_diversity, generate_recommendations, reason_for };

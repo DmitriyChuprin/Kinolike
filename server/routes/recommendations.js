@@ -4,6 +4,7 @@ const ListItemModel = require('../models/listItem');
 const RecommendationModel = require('../models/recommendation');
 const tmdbService = require('../services/tmdb');
 const { generateForUser } = require('../services/backgroundRecommendations');
+const { build_user_profile, movie_data, calculate_movie_score, reason_for } = require('../services/personalRecommendations');
 const { authMiddleware } = require('../middleware/auth');
 
 router.use(authMiddleware);
@@ -191,33 +192,69 @@ async function mapWithLimit(items, limit, fn) {
   return results;
 }
 
-// Жанровые подборки
+// Жанровые подборки (персональные — скоринг через профиль вкуса)
+const db = require('../db/database');
+
 router.get('/genres', async (req, res) => {
   try {
     const userId = req.user.id;
 
     // Исключаем просмотренные и «хочу посмотреть»
-    const [watched, wantToWatch] = await Promise.all([
-      ListItemModel.findAll(userId, { status: 'watched' }),
+    const [watchedRaw, wantToWatch] = await Promise.all([
+      ListItemModel.findAllWithMetadata(userId, { status: 'watched' }),
       ListItemModel.findAll(userId, { status: 'want_to_watch' }),
     ]);
+    const watched = watchedRaw.filter(i => i.details);
     const excludeIds = new Set([
-      ...watched.map(i => i.tmdb_id),
+      ...watchedRaw.map(i => i.tmdb_id),
       ...wantToWatch.map(i => i.tmdb_id),
     ]);
 
+    // Профиль вкуса
+    const profile = build_user_profile(watched);
+    const hasProfile = profile.isSufficient;
+
+    // Карта genre_id → name из БД
+    const { rows: genreRows } = await db.query('SELECT id, name FROM genres');
+    const genreMap = new Map(genreRows.map(g => [String(g.id), g.name]));
+
     const collections = await mapWithLimit(GENRE_COLLECTIONS, 5, async (col) => {
       try {
-        // Случайная страница 1-3 для разнообразия (кэшируется отдельно)
         const page = 1 + Math.floor(Math.random() * 3);
         const discover = col.mediaType === 'movie'
           ? tmdbService.discoverMovies
           : tmdbService.discoverTv;
         const data = await discover({ ...col.params, page });
-        const items = (data.results || [])
+
+        let items = (data.results || [])
           .filter(r => !excludeIds.has(r.id))
           .slice(0, 15)
-          .map(r => ({ ...r, media_type: col.mediaType }));
+          .map(r => {
+            // Конвертация genre_ids → genres для movie_data
+            const genres = (r.genre_ids || []).map(id => ({
+              id,
+              name: genreMap.get(String(id)) || `#${id}`,
+            }));
+            return {
+              ...r,
+              title: r.title || r.name,
+              genres,
+              media_type: col.mediaType,
+              details: { ...r, genres, title: r.title || r.name },
+            };
+          });
+
+        // Скоринг если профиль достаточен
+        if (hasProfile) {
+          items = items.map(item => {
+            const candidate = movie_data({ ...item, tmdb_id: item.id });
+            const { score, components } = calculate_movie_score(candidate, profile);
+            const { reason, matched_movies } = reason_for(candidate, profile);
+            return { ...item, score, reason, matched_movies };
+          });
+          items.sort((a, b) => (b.score || 0) - (a.score || 0));
+        }
+
         return { key: col.key, title: col.title, media_type: col.mediaType, items };
       } catch (err) {
         console.error(`[Recommendations] Ошибка подборки ${col.key}:`, err.message);
@@ -225,10 +262,33 @@ router.get('/genres', async (req, res) => {
       }
     });
 
-    res.json({ collections });
+    res.json({ collections, hasProfile });
   } catch (err) {
     console.error('Ошибка жанровых подборок:', err);
     res.status(500).json({ error: 'Не удалось получить подборки' });
+  }
+});
+
+// AI-поиск фильмов по естественному запросу
+router.post('/search', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { query } = req.body;
+
+    // Валидация
+    if (!query || !query.trim()) {
+      return res.status(400).json({ error: 'Введите запрос для поиска' });
+    }
+    if (query.length > 500) {
+      return res.status(400).json({ error: 'Запрос слишком длинный (максимум 500 символов)' });
+    }
+
+    const { searchWithAI } = require('../services/aiSearch');
+    const result = await searchWithAI(userId, query.trim());
+    res.json(result);
+  } catch (err) {
+    console.error('[AI Search] Ошибка:', err);
+    res.status(500).json({ error: 'Не удалось выполнить поиск. Попробуйте переформулировать запрос.' });
   }
 });
 

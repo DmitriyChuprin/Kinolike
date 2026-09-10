@@ -8,4 +8,28 @@ module.exports = {
   MIN_RATED_MOVIES: 2,
   MIN_VOTE_COUNT: 20,
   DIVERSITY: { maxPerGenre: 3, maxPerDirector: 1, penalty: 12 },
+
+  // AI Search scoring weights (must sum to ~1.0)
+  AI_SEARCH_WEIGHTS: {
+    query_match: 0.40,
+    personal_match: 0.30,
+    positive_similarity: 0.15,
+    negative_similarity: -0.10,
+    quality_score: 0.05,
+  },
+  // Adaptive: reduce personal_match when user has few ratings
+  AI_SEARCH_ADAPTIVE: {
+    personal_match_high: 0.35,   // ≥30 rated
+    personal_match_mid: 0.25,    // 10-29 rated
+    personal_match_low: 0.10,    // 3-9 rated
+    personal_match_min: 0.02,    // <3 rated
+  },
+  // Progressive constraint relaxation
+  AI_RELAX_STEPS: [
+    { relax: 'year_range', by: 3 },       // extend year range ±3
+    { relax: 'vote_count', halve: true },  // lower popularity threshold
+    { relax: 'genre_match', to: 1 },       // require only 1 genre match instead of all
+  ],
+  AI_RERANK_TOP_N: 20,   // candidates sent to LLM for final selection
+  AI_RERANK_FINAL_N: 10, // final results after LLM rerank
 };
