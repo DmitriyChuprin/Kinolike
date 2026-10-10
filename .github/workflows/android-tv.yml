@@ -32,10 +32,14 @@ jobs:
 
       - name: Install required Android SDK components
         shell: bash
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
         run: |
           set -o pipefail
-          yes | sdkmanager --licenses
-          sdkmanager --install "platforms;android-37" "build-tools;36.0.0"
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses
+          "$sdkmanager" --install "platforms;android-37" "build-tools;36.0.0"
 
       - name: Verify Gradle Wrapper
         working-directory: android-tv
