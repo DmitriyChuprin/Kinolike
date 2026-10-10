@@ -15,15 +15,36 @@ services:
       retries: 5
 
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - "3001:3000"
+      - "${KINOLIKE_PORT:-3001}:3000"
     volumes:
       - /mnt/server/movies:/mnt/server/movies
       - /mnt/server/serials:/mnt/server/serials
       - image-cache:/app/server/cache/images
+      - imdb-data:/app/data/imdb
     env_file:
       - .env
+    environment:
+      NODE_ENV: production
+      PGHOST: db
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-kinolike}
+      PGUSER: ${POSTGRES_USER:-kinolike}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-kinolike_secret}
+      TMDB_SYNC_ENABLED: ${TMDB_SYNC_ENABLED:-true}
+      TMDB_SYNC_INTERVAL_HOURS: ${TMDB_SYNC_INTERVAL_HOURS:-168}
+      TMDB_SYNC_INITIAL_DELAY_MINUTES: ${TMDB_SYNC_INITIAL_DELAY_MINUTES:-30}
+      KINOLIKE_API_ENABLED: ${KINOLIKE_API_ENABLED:-true}
+      KINOLIKE_API_TOKEN: ${KINOLIKE_API_TOKEN}
+      KINOLIKE_API_USER_ID: ${KINOLIKE_API_USER_ID}
+      KINOLIKE_API_USERNAME: ${KINOLIKE_API_USERNAME:-}
+      KINOLIKE_API_RATE_LIMIT: ${KINOLIKE_API_RATE_LIMIT:-120}
+      KINOLIKE_API_RATE_WINDOW_MS: ${KINOLIKE_API_RATE_WINDOW_MS:-60000}
+      KINOLIKE_API_DOCS: ${KINOLIKE_API_DOCS:-false}
+      STREAMING_DIAGNOSTICS: ${STREAMING_DIAGNOSTICS:-false}
     depends_on:
       db:
         condition: service_healthy
@@ -32,3 +53,4 @@ services:
 volumes:
   pg-data:
   image-cache:
+  imdb-data:

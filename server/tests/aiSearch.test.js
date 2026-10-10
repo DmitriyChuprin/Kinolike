@@ -7,7 +7,8 @@ const {
   validateSearchParams, fallback_parse, keywordRelevance,
   calculate_query_match, calculate_personal_match, calculate_positive_similarity,
   calculate_negative_similarity, calculate_quality_score,
-  apply_diversity, getPersonalWeight,
+  calculate_mainstream_score, calculate_vote_confidence, calculate_freshness_score,
+  rank_candidates, apply_diversity, getPersonalWeight,
 } = require('../services/aiSearch');
 const config = require('../services/recommendationConfig');
 
@@ -39,6 +40,13 @@ test('similar_to string normalized to array', () => {
   validateSearchParams(p);
   assert(Array.isArray(p.similar_to));
   assertEq(p.similar_to.length, 1);
+});
+
+test('null optional arrays normalized to empty arrays', () => {
+  const p = { genres: ['35'], excluded_genres: null, keywords: null, excluded_keywords: null, mood: ['light'], similar_to: null };
+  assert(validateSearchParams(p));
+  assertEq(p.similar_to.length, 0);
+  assertEq(p.keywords.length, 0);
 });
 
 test('year swap when from > to', () => {
@@ -83,6 +91,18 @@ test('year detection', () => {
 test('mood detection', () => {
   const p = fallback_parse('Что-нибудь лёгкое на вечер');
   assert(p.mood.includes('light'));
+});
+
+test('Russian word duration and five-year TV miniseries are parsed', () => {
+  const p = fallback_parse('Хочу детективный мини-сериал последних пяти лет примерно на два часа');
+  assertEq(p.media_type, 'tv');
+  assertEq(p.runtime_max, 135);
+  assertEq(p.year_to - p.year_from + 1, 5);
+  assert(p.genres.includes('9648'));
+});
+
+test('family viewing is mapped to the family genre', () => {
+  assert(fallback_parse('Что посмотреть с семьёй?').genres.includes('10751'));
 });
 
 // ─── keywordRelevance ───────────────────────────────────────────────
@@ -172,6 +192,78 @@ test('AI_SEARCH_ADAPTIVE exist', () => {
 test('AI_RERANK constants exist', () => {
   assert(config.AI_RERANK_TOP_N > 0);
   assert(config.AI_RERANK_FINAL_N > 0);
+});
+
+// ─── Mainstream/era-aware ranking ──────────────────────────────────
+console.log('\n=== Mainstream and era-aware ranking ===');
+
+test('fallback parser detects mainstream context', () => {
+  const p = fallback_parse('Посоветуй что-нибудь популярное посмотреть вечером');
+  assert(p.prefer_mainstream === true);
+  assert(p.prefer_hidden_gems === false);
+});
+
+test('fallback parser relaxes mainstream for hidden gems and classics', () => {
+  const hidden = fallback_parse('Посоветуй малоизвестную хорошую фантастику');
+  const classic = fallback_parse('Посоветуй классический фильм 70-х');
+  assert(hidden.prefer_hidden_gems === true);
+  assert(hidden.prefer_mainstream === false);
+  assert(classic.prefer_classics === true);
+  assert(classic.year_from === 1970);
+  assert(classic.year_to === 1979);
+});
+
+test('vote confidence grows logarithmically', () => {
+  const candidate = votes => ({ data: { vote_average: 7.5, vote_count: votes, popularity: 20 } });
+  const low = calculate_vote_confidence(candidate(50));
+  const acceptable = calculate_vote_confidence(candidate(500));
+  const high = calculate_vote_confidence(candidate(5000));
+  assert(low < acceptable && acceptable < high);
+  assert(high - acceptable < acceptable - low || high - acceptable < 25, 'confidence should have diminishing returns');
+});
+
+test('popular modern title beats highly rated obscure old title', () => {
+  const makeCandidate = (id, year, rating, votes, popularity) => ({
+    tmdb_id: id, media_type: 'movie', title: `Movie ${id}`, genre_ids: [35],
+    data: {
+      id, title: `Movie ${id}`, genres: [{ id: 35, name: 'Comedy' }],
+      overview: 'A complete movie overview for ranking tests.',
+      keywords: { keywords: [{ id: 1, name: 'evening' }] },
+      release_date: `${year}-01-01`, vote_average: rating, vote_count: votes, popularity,
+      credits: { crew: [], cast: [] },
+    },
+  });
+  const old = makeCandidate(401, 1973, 8.1, 70, 5);
+  const modern = makeCandidate(402, 2018, 7.7, 15000, 80);
+  assert(calculate_mainstream_score(modern) > calculate_mainstream_score(old));
+  const params = { genres: ['35'], keywords: [], prefer_mainstream: true, prefer_hidden_gems: false, prefer_classics: false, prefer_recent: false };
+  const userProfile = { ratedCount: 0, profile: { isSufficient: false } };
+  const ranked = rank_candidates([old, modern], params, userProfile, null);
+  assert(ranked[0].candidate.tmdb_id === 402);
+  assert(ranked[0].components.vote_confidence > ranked[1].components.vote_confidence);
+});
+
+test('standard composition limits niche titles', () => {
+  const makeCandidate = (id, mainstream) => ({
+    tmdb_id: id, media_type: 'movie', title: `Movie ${id}`, genre_ids: [id],
+    data: {
+      id, title: `Movie ${id}`, genres: [{ id, name: `Genre ${id}` }],
+      overview: 'A complete movie overview for composition tests.',
+      keywords: { keywords: [{ id: 1, name: 'test' }] }, release_date: '2018-01-01',
+      vote_average: mainstream ? 7.8 : 6.2, vote_count: mainstream ? 15000 : 300,
+      popularity: mainstream ? 80 : 1, credits: { crew: [], cast: [] },
+    },
+  });
+  const params = { genres: [], keywords: [], prefer_mainstream: true, prefer_hidden_gems: false, prefer_classics: false, prefer_recent: false };
+  const userProfile = { ratedCount: 0, profile: { isSufficient: false } };
+  const ranked = rank_candidates([
+    ...Array.from({ length: 8 }, (_, i) => makeCandidate(500 + i, true)),
+    ...Array.from({ length: 4 }, (_, i) => makeCandidate(600 + i, false)),
+  ], params, userProfile, null);
+  const selected = apply_diversity(ranked, 10, params);
+  const niche = selected.filter(item => item.components.mainstream_score < config.MAINSTREAM_SCORE_MIN);
+  assert(niche.length <= 2, `too many niche titles in standard top 10: ${niche.length}`);
+  assert(selected.length >= 8, 'composition pass should keep a useful result set');
 });
 
 // ─── Summary ────────────────────────────────────────────────────────

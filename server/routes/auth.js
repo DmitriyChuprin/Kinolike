@@ -2,7 +2,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
 const UserModel = require('../models/user');
-const { authMiddleware } = require('../middleware/auth');
+const { authMiddleware, setTokenCookie, clearTokenCookie } = require('../middleware/auth');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
 
@@ -25,8 +25,8 @@ router.post('/register', async (req, res) => {
     const result = await UserModel.create(username, email, password);
     const user = await UserModel.findById(result.lastInsertRowid);
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-    res.cookie('token', token, { httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000, sameSite: 'lax' });
-    res.json({ user, token });
+    setTokenCookie(res, token);
+    res.json({ user, ...(process.env.LEGACY_AUTH_TOKENS === 'true' ? { token } : {}) });
   } catch (err) {
     console.error('Ошибка регистрации:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
@@ -45,10 +45,10 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Неверный email или пароль' });
     }
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-    res.cookie('token', token, { httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000, sameSite: 'lax' });
+    setTokenCookie(res, token);
     res.json({
-      user: { id: user.id, username: user.username, email: user.email, avatar_url: user.avatar_url },
-      token,
+      user: { id: user.id, username: user.username, email: user.email, avatar_url: user.avatar_url, is_admin: user.is_admin, jellyfin_enabled: user.jellyfin_enabled, preferred_streaming_source: user.preferred_streaming_source },
+      ...(process.env.LEGACY_AUTH_TOKENS === 'true' ? { token } : {}),
     });
   } catch (err) {
     console.error('Ошибка входа:', err);
@@ -58,21 +58,29 @@ router.post('/login', async (req, res) => {
 
 // Выход
 router.post('/logout', (req, res) => {
-  res.clearCookie('token');
+  clearTokenCookie(res);
   res.json({ message: 'Вы вышли из аккаунта' });
 });
 
 // Текущий пользователь
 router.get('/me', authMiddleware, async (req, res) => {
-  const user = await UserModel.findById(req.user.id);
-  if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
-  res.json({ user });
+  try {
+    const user = await UserModel.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+    res.json({ user });
+  } catch (err) {
+    console.error('Ошибка получения текущего пользователя:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
 });
 
 // Обновить профиль
 router.put('/profile', authMiddleware, async (req, res) => {
   try {
-    const { username, email, avatar_url } = req.body;
+    const { username, email, avatar_url, preferred_streaming_source } = req.body;
+    if (preferred_streaming_source !== undefined && !['phantom', 'videohub'].includes(preferred_streaming_source)) {
+      return res.status(400).json({ error: 'Некорректный источник онлайн-просмотра' });
+    }
     if (email) {
       const existing = await UserModel.findByEmail(email);
       if (existing && existing.id !== req.user.id) {
@@ -85,7 +93,7 @@ router.put('/profile', authMiddleware, async (req, res) => {
         return res.status(409).json({ error: 'Имя пользователя уже занято' });
       }
     }
-    await UserModel.updateProfile(req.user.id, { username, email, avatar_url });
+    await UserModel.updateProfile(req.user.id, { username, email, avatar_url, preferred_streaming_source });
     const user = await UserModel.findById(req.user.id);
     res.json({ user });
   } catch (err) {
@@ -101,6 +109,7 @@ router.put('/password', authMiddleware, async (req, res) => {
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Все поля обязательны' });
     }
+    if (newPassword.length < 8) return res.status(400).json({ error: 'Новый пароль должен быть не короче 8 символов' });
     const fullUser = await UserModel.findById(req.user.id);
     const user = await UserModel.findByEmail(fullUser.email);
     if (!UserModel.verifyPassword(currentPassword, user.password_hash)) {

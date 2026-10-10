@@ -7,11 +7,15 @@ const App = {
   // Инициализация
   async init() {
     this.initTheme();
-    this.initHamburger();
+    this.initThemeToggle();
+    this.initSidebar();
+    this.initBottomNav();
+    this.initTopbar();
     this.initUserMenu();
     this.initSearch();
     this.initLogout();
-    
+    this.initKeyboardShortcuts();
+
     // Проверяем авторизацию
     try {
       const data = await API.auth.me();
@@ -21,14 +25,14 @@ const App = {
       this.currentUser = null;
       this.updateUserUI();
     }
-    
+
     // Загружаем жанры
     try {
       this.genres = await API.tmdb.genres();
     } catch (e) {
       this.genres = { movie: [], tv: [] };
     }
-    
+
     // Глобальный обработчик кнопки «Обновить» (для каталога/поиска)
     document.addEventListener('click', async (e) => {
       const btn = e.target.closest('.list-refresh');
@@ -56,7 +60,7 @@ const App = {
         btn.textContent = '↻';
       }
     });
-    
+
     // Роутинг
     window.addEventListener('hashchange', () => this.route());
     this.route();
@@ -85,7 +89,7 @@ const App = {
       window.location.hash = '#/login';
       return;
     }
-    
+
     // Определяем страницу
     if (path === '/' || path === '') {
       this.renderPage('home', () => Movies.render());
@@ -121,13 +125,13 @@ const App = {
   renderPage(page, renderFn) {
     this.currentPage = page;
     UI.setActiveNav(page);
-    
+
     const app = document.getElementById('app');
     app.innerHTML = '';
     app.classList.add('page-enter');
-    
+
     setTimeout(() => app.classList.remove('page-enter'), 300);
-    
+
     renderFn();
   },
 
@@ -136,15 +140,12 @@ const App = {
     const authButtons = document.getElementById('authButtons');
     const userActions = document.getElementById('userActions');
     const dropdownUser = document.getElementById('dropdownUser');
-    
-    if (this.currentUser) {
-      authButtons.style.display = 'none';
-      userActions.style.display = 'block';
-      dropdownUser.textContent = this.currentUser.username;
-    } else {
-      authButtons.style.display = 'block';
-      userActions.style.display = 'none';
-    }
+    const sidebarUserName = document.getElementById('sidebarUserName');
+
+    if (authButtons) authButtons.style.display = this.currentUser ? 'none' : 'block';
+    if (userActions) userActions.style.display = this.currentUser ? 'block' : 'none';
+    if (dropdownUser && this.currentUser) dropdownUser.textContent = this.currentUser.username;
+    if (sidebarUserName) sidebarUserName.textContent = this.currentUser ? this.currentUser.username : 'Войти';
   },
 
   // Тема
@@ -153,48 +154,68 @@ const App = {
     document.documentElement.setAttribute('data-theme', saved);
   },
 
-  // Гамбургер
-  initHamburger() {
-    const hamburger = document.getElementById('hamburger');
-    const mobileNav = document.getElementById('mobileNav');
+  // Переключатель темы (sidebar)
+  initThemeToggle() {
+    const btn = document.getElementById('themeToggle');
+    if (!btn) return;
 
-    hamburger.addEventListener('click', () => {
-      mobileNav.classList.toggle('active');
+    btn.addEventListener('click', () => {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme') || 'dark';
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
     });
-
-    // Закрытие при клике на ссылку
-    mobileNav.querySelectorAll('a').forEach(link => {
-      link.addEventListener('click', () => mobileNav.classList.remove('active'));
-    });
-
-    // Закрытие при скролле
-    let lastScroll = 0;
-    window.addEventListener('scroll', () => {
-      const currentScroll = window.scrollY;
-      if (mobileNav.classList.contains('active') && currentScroll !== lastScroll) {
-        mobileNav.classList.remove('active');
-      }
-      lastScroll = currentScroll;
-    }, { passive: true });
   },
 
-  // Меню пользователя
+  // Sidebar (overlay close)
+  initSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebarOverlay');
+
+    if (!sidebar || !overlay) return;
+
+    const closeSidebar = () => {
+      sidebar.classList.remove('active');
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+    };
+
+    // Закрытие при клике на overlay
+    overlay.addEventListener('click', closeSidebar);
+
+    // Закрытие при клике на ссылку в sidebar
+    sidebar.querySelectorAll('.sidebar-link').forEach(link => {
+      link.addEventListener('click', () => {
+        if (window.innerWidth <= 768) {
+          closeSidebar();
+        }
+      });
+    });
+  },
+
+  // Меню пользователя (sidebar)
   initUserMenu() {
-    const btn = document.getElementById('userBtn');
-    const dropdown = document.getElementById('userDropdown');
-    
+    const btn = document.getElementById('sidebarUserBtn');
+    const dropdown = document.getElementById('sidebarUserDropdown');
+
+    if (!btn || !dropdown) return;
+
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       dropdown.classList.toggle('active');
     });
-    
+
     document.addEventListener('click', () => dropdown.classList.remove('active'));
     dropdown.addEventListener('click', (e) => e.stopPropagation());
   },
 
   // Выход
   initLogout() {
-    document.getElementById('logoutBtn').addEventListener('click', async () => {
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (!logoutBtn) return;
+
+    logoutBtn.addEventListener('click', async () => {
       try {
         await API.auth.logout();
         localStorage.removeItem('authToken');
@@ -208,42 +229,87 @@ const App = {
     });
   },
 
+  // Bottom navigation (мобильное нижнее меню)
+  initBottomNav() {
+    const bottomNav = document.getElementById('bottomNav');
+    if (!bottomNav) return;
+
+    // Close sidebar on mobile when bottom nav link clicked
+    bottomNav.querySelectorAll('.bottom-nav-link').forEach(link => {
+      link.addEventListener('click', () => {
+        const sidebar = document.getElementById('sidebar');
+        const overlay = document.getElementById('sidebarOverlay');
+        if (sidebar) sidebar.classList.remove('active');
+        if (overlay) overlay.classList.remove('active');
+        document.body.style.overflow = '';
+      });
+    });
+  },
+
+  // Topbar (поиск и переключатель темы)
+  initTopbar() {
+    const topbarSearch = document.getElementById('topbarSearchInput');
+    const themeToggleTop = document.getElementById('themeToggleTop');
+
+    // Topbar search → navigate to search page on Enter
+    if (topbarSearch) {
+      topbarSearch.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && topbarSearch.value.trim()) {
+          window.location.hash = '#/search?q=' + encodeURIComponent(topbarSearch.value.trim());
+          topbarSearch.value = '';
+          topbarSearch.blur();
+        }
+      });
+    }
+
+    // Topbar theme toggle (synced with sidebar toggle)
+    if (themeToggleTop) {
+      themeToggleTop.addEventListener('click', () => {
+        const current = document.documentElement.getAttribute('data-theme');
+        const next = current === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        localStorage.setItem('theme', next);
+      });
+    }
+  },
+
   // Поиск
   initSearch() {
     const input = document.getElementById('searchInput');
     const results = document.getElementById('searchResults');
     let debounceTimer;
 
-    // Переход на страницу поиска по Enter
-    const goToSearchPage = () => {
-      const query = input.value.trim();
-      if (query.length >= 2) {
-        window.location.hash = `#/search?q=${encodeURIComponent(query)}`;
-        results.classList.remove('active');
-      }
-    };
+    // Переход на страницу поиска по Enter (только для header search)
+    if (input && results) {
+      const goToSearchPage = () => {
+        const query = input.value.trim();
+        if (query.length >= 2) {
+          window.location.hash = `#/search?q=${encodeURIComponent(query)}`;
+          results.classList.remove('active');
+        }
+      };
 
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        goToSearchPage();
-      }
-    });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          goToSearchPage();
+        }
+      });
 
-    input.addEventListener('input', () => {
-      clearTimeout(debounceTimer);
-      const query = input.value.trim();
-      
-      if (query.length < 2) {
-        results.classList.remove('active');
-        return;
-      }
-      
-      debounceTimer = setTimeout(async () => {
-        try {
-          const data = await API.tmdb.search(query);
-          const items = (data.results || []).slice(0, 8);
-          
+      input.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        const query = input.value.trim();
+
+        if (query.length < 2) {
+          results.classList.remove('active');
+          return;
+        }
+
+        debounceTimer = setTimeout(async () => {
+          try {
+            const data = await API.tmdb.search(query);
+            const items = (data.results || []).slice(0, 8);
+
           if (items.length === 0) {
             results.innerHTML = '<div style="padding:12px;color:var(--text-secondary);font-size:0.85rem">Ничего не найдено. Нажмите Enter для полного поиска</div>';
           } else {
@@ -253,7 +319,7 @@ const App = {
               const type = item.media_type === 'tv' ? 'Сериал' : 'Фильм';
               return `
                 <div class="search-result-item" data-id="${item.id}" data-type="${item.media_type || 'movie'}">
-                  ${item.poster_path 
+                  ${item.poster_path
                     ? `<img src="${IMG.backdrop(item.poster_path, 'w185')}" alt="${title}" style="width:80px;height:45px;object-fit:cover;border-radius:6px">`
                     : `<div style="width:80px;height:45px;background:var(--bg-tertiary);border-radius:4px;display:flex;align-items:center;justify-content:center">🎬</div>`
                   }
@@ -265,9 +331,9 @@ const App = {
               `;
             }).join('');
           }
-          
+
           results.classList.add('active');
-          
+
           // Клик на результат
           results.querySelectorAll('.search-result-item').forEach(el => {
             el.addEventListener('click', () => {
@@ -283,13 +349,28 @@ const App = {
         }
       }, 300);
     });
-    
+
     // Закрытие результатов при клике вне
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.search-wrapper')) {
         results.classList.remove('active');
       }
     });
+
+    } // end if (input && results)
+
+    // Sidebar поиск — клик переводит фокус на основной input или открывает страницу поиска
+    const sidebarSearch = document.getElementById('sidebarSearch');
+    if (sidebarSearch) {
+      sidebarSearch.addEventListener('click', () => {
+        // Если на странице есть input поиска — фокусируемся
+        if (input && document.getElementById('app').contains(input)) {
+          input.focus();
+        } else {
+          window.location.hash = '#/search';
+        }
+      });
+    }
 
     // Мобильный поиск
     this.initMobileSearch();
@@ -377,6 +458,28 @@ const App = {
         overlay.classList.remove('active');
         input.value = '';
         results.innerHTML = '';
+      }
+    });
+  },
+
+  // Горячие клавиши
+  initKeyboardShortcuts() {
+    document.addEventListener('keydown', (e) => {
+      // Ctrl+K — фокус на поиск или переход на страницу поиска
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        // Try topbar search first, then sidebar search, then navigate
+        const topbarSearch = document.getElementById('topbarSearchInput');
+        const searchInput = document.getElementById('searchInput');
+        if (topbarSearch && document.getElementById('topbar') && document.getElementById('topbar').contains(topbarSearch)) {
+          topbarSearch.focus();
+          topbarSearch.select();
+        } else if (searchInput && document.getElementById('app').contains(searchInput)) {
+          searchInput.focus();
+          searchInput.select();
+        } else {
+          window.location.hash = '#/search';
+        }
       }
     });
   },

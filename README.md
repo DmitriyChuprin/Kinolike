@@ -12,10 +12,11 @@
 - **Профиль** — статистика, настройки, экспорт/импорт
 - **Тёмная/светлая тема**
 - **Детальная информация** — год, жанры, режиссёры, актёры для каждого фильма/сериала
+- **IMDb enrichment** — IMDb ID, рейтинг, голоса и расширенная фильмография без замены TMDB
 
 ## Технологии
 
-- **Frontend**: Vanilla HTML5 + CSS3 + JS (SPA hash-based)
+- **Frontend**: React + TypeScript + Vite (SPA)
 - **Backend**: Node.js 20 + Express 4
 - **БД**: PostgreSQL 16
 - **AI**: OpenAI-compatible API
@@ -32,17 +33,44 @@
 cp .env.example .env
 # Заполните TMDB_API_KEY, JWT_SECRET, AI_API_KEY
 
-docker-compose up -d
+docker compose up -d --build
 ```
+
+После запуска приложение доступно на `http://localhost:3001`. Frontend React/Vite
+собирается внутри Docker-образа, отдельно запускать Vite не требуется.
+
+Остановка сервисов:
+
+```bash
+docker compose down
+```
+
+Данные PostgreSQL хранятся в volume `pg-data` и сохраняются при обычном
+перезапуске контейнеров. Удаление volume (`docker compose down -v`) удалит базу
+данных и все учётные записи.
 
 ### Для разработки
 
 ```bash
-npm install
+npm ci
 cp .env.example .env
-# Заполните переменные окружения
+# Заполните переменные окружения; для локального PostgreSQL задайте PGHOST=localhost
 npm run dev
 ```
+
+В отдельном терминале запустите `npm run client:dev` и откройте
+`http://localhost:5173`. Vite проксирует запросы API на backend (порт 3000).
+PostgreSQL должен быть запущен отдельно. Для проверки перед отправкой изменений:
+
+```bash
+npm run check:frontend
+npm test
+npm run test:e2e
+```
+
+GitHub Actions выполняет эти проверки и сборку Docker-образа при push и pull request.
+Файлы `.env`, локальные базы данных, кэши и результаты сборки исключены из Git.
+В репозиторий добавляется только шаблон `.env.example` без рабочих секретов.
 
 ## Конфигурация (.env)
 
@@ -65,15 +93,20 @@ npm run dev
 | PGDATABASE | Имя базы данных |
 | PGUSER | Пользователь PostgreSQL |
 | PGPASSWORD | Пароль PostgreSQL |
+| IMDB_DATA_DIR | Каталог локальных IMDb `.tsv.gz` (в Docker `/app/data/imdb`) |
+| IMDB_AUTO_UPDATE | Включить периодическое обновление IMDb (`true`/`false`) |
+| IMDB_UPDATE_INTERVAL_HOURS | Интервал обновления IMDb в часах |
+| IMDB_TMDB_RESOLVE_LIMIT | Максимум IMDb-only работ для точного поиска в TMDB за импорт |
 
 ## Структура проекта
 
 ```
 kinolike/
-├── client/           # Frontend (vanilla)
-│   ├── index.html    # SPA entry point
-│   ├── css/          # Стили
-│   └── js/           # Модули
+├── src/              # React/TypeScript frontend
+│   ├── pages/        # Страницы приложения
+│   ├── components/   # UI-компоненты
+│   └── services/     # API и преобразование данных
+├── client/           # Production-сборка Vite
 ├── server/           # Backend (Node.js + Express)
 │   ├── index.js      # Entry point
 │   ├── routes/       # API маршруты
@@ -86,7 +119,11 @@ kinolike/
 └── .env.example
 ```
 
-## База данных
+## База данных и перенос аккаунтов
+
+Текущая и старая рабочая версия используют PostgreSQL с одним volume `pg-data` и одинаковыми таблицами `users`/`user_lists`. React-клиент подключён к тем же `/api/auth/*`, поэтому аккаунты, bcrypt-хэши паролей и списки не пересоздаются при переходе на новую верстку. Не выполняйте `docker compose down -v`: это удалит volume вместе с учетными записями.
+
+`DB_PATH` из старого SQLite-конфига больше не используется; фактическое хранилище задаётся `PGHOST`, `PGDATABASE`, `PGUSER` и `PGPASSWORD`.
 
 ### Таблицы
 
@@ -104,6 +141,28 @@ kinolike/
 ### Миграции
 
 Миграции автоматически применяются при старте сервера. Файлы миграций находятся в `server/db/migrations/`.
+
+## IMDb datasets
+
+TMDB остаётся главным источником каталога и изображений. IMDb добавляет внешние
+ID, rating/votes и principal credits из официальных non-commercial datasets.
+
+Первоначальный импорт и последующие ручные обновления:
+
+```bash
+npm run update-imdb-data
+```
+
+Ежедневное обновление только IMDb ratings (без повторного импорта
+фильмографии):
+
+```bash
+npm run update-imdb-ratings
+```
+
+Автоматическое обновление включается через `IMDB_AUTO_UPDATE=true`. Подробности
+архитектуры, точного связывания, `work_score` и параметров запуска находятся в
+[документации IMDb](docs/imdb-integration.md).
 
 ## Прокси для TMDB
 
@@ -215,3 +274,6 @@ node server/tests/recommendations.test.js
 ## Лицензия
 
 MIT
+# Hermes REST API
+
+KinoLike exposes a token-authenticated `/api/v1` integration for external AI agents. Setup, endpoint examples, Docker networking, and verification are documented in [docs/hermes-api.md](docs/hermes-api.md). The OpenAPI source is [docs/openapi.v1.json](docs/openapi.v1.json).

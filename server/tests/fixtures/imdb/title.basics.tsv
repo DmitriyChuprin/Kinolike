@@ -1,0 +1,5 @@
+tconst	titleType	primaryTitle	originalTitle	isAdult	startYear	endYear	runtimeMinutes	genres
+tt0109830	movie	Forrest Gump	Forrest Gump	0	1994	\N	142	Drama,Romance
+tt0112384	movie	Apollo 13	Apollo 13	0	1995	\N	140	Adventure,Drama,History
+tt0185906	tvMiniSeries	Band of Brothers	Band of Brothers	0	2001	2001	594	Drama,History,War
+tt9990001	videoGame	Ignored Game	Ignored Game	0	2020	\N	\N	Action

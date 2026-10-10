@@ -4,10 +4,96 @@ const ListItemModel = require('../models/listItem');
 const RecommendationModel = require('../models/recommendation');
 const tmdbService = require('../services/tmdb');
 const { generateForUser } = require('../services/backgroundRecommendations');
-const { build_user_profile, movie_data, calculate_movie_score, reason_for } = require('../services/personalRecommendations');
+const { build_user_profile, movie_data, calculate_movie_score, candidate_passes_thresholds, reason_for } = require('../services/personalRecommendations');
+const config = require('../services/recommendationConfig');
 const { authMiddleware } = require('../middleware/auth');
+const db = require('../db/database');
+const history = require('../services/recommendationHistory');
+const tasteProfile = require('../services/tasteProfile');
 
 router.use(authMiddleware);
+
+router.post('/feedback', async (req, res) => {
+  try {
+    const item = await history.feedback(req.user.id, req.body || {});
+    const action = req.body?.action;
+    if (['want_to_watch', 'watched', 'not_interested'].includes(action)) {
+      const existing = await ListItemModel.findByTmdb(req.user.id, Number(req.body.tmdb_id), req.body.media_type);
+      if (existing) await ListItemModel.update(existing.id, { status: action, watched_at: action === 'watched' ? new Date().toISOString() : undefined });
+      else await ListItemModel.create(req.user.id, { tmdb_id: Number(req.body.tmdb_id), media_type: req.body.media_type, status: action });
+    }
+    if (action !== 'open') await Promise.all([RecommendationModel.clearCache(req.user.id), tasteProfile.invalidate(req.user.id)]);
+    res.status(201).json({ feedback: item });
+  } catch (error) { res.status(400).json({ error: error.message || 'Не удалось сохранить реакцию' }); }
+});
+
+function recommendationsUnavailable(res) {
+  return res.status(503).json({
+    error: 'recommendations_unavailable',
+    message: 'Рекомендации временно недоступны. Попробуйте позже.',
+  });
+}
+
+function recommendationsTimeout(res) {
+  return res.status(504).json({
+    error: 'recommendations_timeout',
+    message: 'Не удалось получить рекомендации вовремя',
+  });
+}
+
+function isTimeoutError(error) {
+  return /timeout|timed out|abort/i.test(`${error?.name || ''} ${error?.message || ''}`);
+}
+
+router.post('/ask', async (req, res) => {
+  try {
+    const query = String(req.body?.query || '').trim();
+    if (!query || query.length > 500) return res.status(400).json({ error: 'Введите запрос до 500 символов' });
+    const { searchWithAI } = require('../services/aiSearch');
+    const result = await searchWithAI(req.user.id, query, { limit: 5 });
+    await history.recordImpressions(req.user.id, result.recommendations, { algorithm: 'today_v2', query });
+    res.json(result);
+  } catch (error) { console.error('[Today recommendations]', error); return isTimeoutError(error) ? recommendationsTimeout(res) : recommendationsUnavailable(res); }
+});
+
+router.post('/more', async (req, res) => {
+  try {
+    const query = String(req.body?.query || '').trim();
+    if (!query || query.length > 500) return res.status(400).json({ error: 'Введите исходный запрос' });
+    const shown = new Set((Array.isArray(req.body?.exclude) ? req.body.exclude : []).slice(0, 100).map(item => `${item.media_type}:${Number(item.tmdb_id)}`));
+    const { searchWithAI } = require('../services/aiSearch');
+    const result = await searchWithAI(req.user.id, query, { limit: 5, exclude: shown });
+    await history.recordImpressions(req.user.id, result.recommendations, { algorithm: 'today_v2_more', query });
+    res.json(result);
+  } catch (error) { console.error('[More recommendations]', error); return isTimeoutError(error) ? recommendationsTimeout(res) : recommendationsUnavailable(res); }
+});
+
+router.get('/history', async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 30));
+    const { rows } = await db.query(`SELECT re.*, mm.title, mm.poster_path
+      FROM recommendation_events re LEFT JOIN media_metadata mm ON mm.tmdb_id=re.tmdb_id AND mm.media_type=re.media_type
+      WHERE re.user_id=$1 ORDER BY re.shown_at DESC LIMIT $2`, [req.user.id, limit]);
+    res.json({ items: rows });
+  } catch (error) { res.status(500).json({ error: 'Не удалось загрузить историю рекомендаций' }); }
+});
+
+router.get('/collections', async (req, res) => {
+  try {
+    const [cached, want] = await Promise.all([RecommendationModel.getCached(req.user.id), ListItemModel.findAllWithMetadata(req.user.id, { status: 'want_to_watch' })]);
+    const normalize = item => ({ tmdb_id: item.tmdb_id, id: item.tmdb_id, media_type: item.media_type, score: Number(item.score) || null,
+      reason: item.reason || '', structured_reasons: item.structured_reasons || {}, ...(item.details || {}) });
+    const best = cached.map(normalize);
+    const collections = [];
+    const add = (key, title, items) => { if (items.length >= 3) collections.push({ key, title, items: items.slice(0, 10) }); };
+    add('best', 'Лучшее для вас', best);
+    add('under-two-hours', 'До 2 часов', best.filter(item => Number(item.runtime) > 0 && Number(item.runtime) <= 120));
+    add('new-for-you', 'Новинки для вас', best.filter(item => Number(String(item.release_date || item.first_air_date || '').slice(0, 4)) >= new Date().getUTCFullYear() - 2));
+    add('series', 'Сериалы для вас', best.filter(item => item.media_type === 'tv'));
+    add('want', 'Из вашего Want to Watch', want.map(item => normalize({ ...item, details: item.details || {} })));
+    res.json({ collections: collections.slice(0, 5) });
+  } catch (error) { res.status(500).json({ error: 'Не удалось собрать коллекции' }); }
+});
 
 // Получить рекомендации
 router.get('/', async (req, res) => {
@@ -23,7 +109,9 @@ router.get('/', async (req, res) => {
     // Из кэша отдаём только фильмы (сериалы — в жанровых подборках)
     const movieItems = cached.filter(i => i.media_type === 'movie');
     if (movieItems.length > 0) {
-      return res.json({ items: movieItems, recommendations: movieItems.map(item => ({ movie_id: item.tmdb_id, tmdb_id: item.tmdb_id, media_type: item.media_type, title: item.details?.title || item.details?.name || `TMDB #${item.tmdb_id}`, score: Number(item.score), reason: item.reason, matched_movies: item.matched_movies || [], poster_path: item.details?.poster_path || null, overview: item.details?.overview || '' })), fromCache: true });
+      const recommendations = movieItems.map(item => ({ movie_id: item.tmdb_id, tmdb_id: item.tmdb_id, media_type: item.media_type, title: item.details?.title || item.details?.name || `TMDB #${item.tmdb_id}`, score: Number(item.score), reason: item.reason, matched_movies: item.matched_movies || [], structured_reasons: item.structured_reasons || {}, poster_path: item.details?.poster_path || null, overview: item.details?.overview || '', imdb_id: item.imdb_id || null, imdb_rating: item.imdb_rating == null ? null : Number(item.imdb_rating), imdb_votes: item.imdb_votes == null ? null : Number(item.imdb_votes) }));
+      await history.recordImpressions(userId, recommendations, { algorithm: 'personal_v2' });
+      return res.json({ items: recommendations, recommendations, fromCache: true });
     }
 
     // Кэш пустой — запускаем генерацию в фоне, возвращаем pending
@@ -48,15 +136,24 @@ router.post('/generate', async (req, res) => {
   }
 });
 
-// Кастомный запрос
+// Кастомный запрос. Этот маршрут оставлен для совместимости со старым
+// клиентом, но должен использовать тот же AI-поиск, что и /search.
 router.post('/custom', async (req, res) => {
   try {
-    const { query } = req.body;
-    if (!query) return res.status(400).json({ error: 'query обязателен' });
-    return await generateAndReturn(req.user.id, res, query);
+    const { query } = req.body || {};
+    if (typeof query !== 'string' || !query.trim()) {
+      return res.status(400).json({ error: 'Введите запрос для поиска' });
+    }
+    if (query.length > 500) {
+      return res.status(400).json({ error: 'Запрос слишком длинный (максимум 500 символов)' });
+    }
+
+    const { searchWithAI } = require('../services/aiSearch');
+    const result = await searchWithAI(req.user.id, query.trim());
+    return res.json(result);
   } catch (err) {
-    console.error('Ошибка кастомного запроса:', err);
-    res.status(500).json({ error: 'Не удалось сгенерировать рекомендации' });
+    console.error('[AI Search] Ошибка кастомного запроса:', err);
+    return isTimeoutError(err) ? recommendationsTimeout(res) : recommendationsUnavailable(res);
   }
 });
 
@@ -96,7 +193,7 @@ router.get('/favorite-genre', async (req, res) => {
       return res.json({ collection: null });
     }
 
-    // Исключаем просмотренные и «хочу посмотреть»
+    // Исключаем просмотренные, «хочу посмотреть» и отмеченные как неинтересные
     const wantToWatch = await ListItemModel.findAll(userId, { status: 'want_to_watch' });
     const excludeIds = new Set([
       ...watched.map(i => i.tmdb_id),
@@ -193,21 +290,22 @@ async function mapWithLimit(items, limit, fn) {
 }
 
 // Жанровые подборки (персональные — скоринг через профиль вкуса)
-const db = require('../db/database');
 
 router.get('/genres', async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Исключаем просмотренные и «хочу посмотреть»
-    const [watchedRaw, wantToWatch] = await Promise.all([
+    // Исключаем просмотренные, «хочу посмотреть» и отмеченные как неинтересные
+    const [watchedRaw, wantToWatch, notInterested] = await Promise.all([
       ListItemModel.findAllWithMetadata(userId, { status: 'watched' }),
       ListItemModel.findAll(userId, { status: 'want_to_watch' }),
+      ListItemModel.findAll(userId, { status: 'not_interested' }),
     ]);
     const watched = watchedRaw.filter(i => i.details);
     const excludeIds = new Set([
       ...watchedRaw.map(i => i.tmdb_id),
       ...wantToWatch.map(i => i.tmdb_id),
+      ...notInterested.map(i => i.tmdb_id),
     ]);
 
     // Профиль вкуса
@@ -227,7 +325,7 @@ router.get('/genres', async (req, res) => {
         const data = await discover({ ...col.params, page });
 
         let items = (data.results || [])
-          .filter(r => !excludeIds.has(r.id))
+          .filter(r => !excludeIds.has(r.id) && candidate_passes_thresholds({ tmdb_id: r.id, media_type: col.mediaType, details: r }))
           .slice(0, 15)
           .map(r => {
             // Конвертация genre_ids → genres для movie_data
@@ -288,7 +386,7 @@ router.post('/search', async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('[AI Search] Ошибка:', err);
-    res.status(500).json({ error: 'Не удалось выполнить поиск. Попробуйте переформулировать запрос.' });
+    return isTimeoutError(err) ? recommendationsTimeout(res) : recommendationsUnavailable(res);
   }
 });
 
@@ -308,18 +406,20 @@ router.get('/discover', async (req, res) => {
     } = req.query;
 
     // Исключаем просмотренные и «хочу посмотреть»
-    const [watched, wantToWatch] = await Promise.all([
+    const [watched, wantToWatch, notInterested] = await Promise.all([
       ListItemModel.findAll(userId, { status: 'watched' }),
       ListItemModel.findAll(userId, { status: 'want_to_watch' }),
+      ListItemModel.findAll(userId, { status: 'not_interested' }),
     ]);
     const excludeIds = new Set([
       ...watched.map(i => i.tmdb_id),
       ...wantToWatch.map(i => i.tmdb_id),
+      ...notInterested.map(i => i.tmdb_id),
     ]);
 
     const discoverParams = {
       page: parseInt(page),
-      'vote_count.gte': 50,
+      'vote_count.gte': config.MIN_VOTE_COUNT,
     };
 
     if (genre) discoverParams.with_genres = genre;
@@ -336,11 +436,6 @@ router.get('/discover', async (req, res) => {
     if (year_to) discoverParams['primary_release_date.lte'] = `${year_to}-12-31`;
     if (sort_by) discoverParams.sort_by = sort_by;
     else discoverParams.sort_by = 'popularity.desc';
-
-    // Если указана конкретная страна — снижаем порог vote_count (меньше контента)
-    if (country) {
-      discoverParams['vote_count.gte'] = country === 'RU' ? 15 : 30;
-    }
 
     const results = { items: [], total_results: 0, total_pages: 0 };
 
@@ -404,9 +499,14 @@ async function generateAndReturn(userId, res) {
     score: Number(item.score),
     reason: item.reason,
     matched_movies: item.matched_movies || [],
+    structured_reasons: item.structured_reasons || {},
     poster_path: item.details?.poster_path || null,
     overview: item.details?.overview || '',
+    imdb_id: item.imdb_id || null,
+    imdb_rating: item.imdb_rating == null ? null : Number(item.imdb_rating),
+    imdb_votes: item.imdb_votes == null ? null : Number(item.imdb_votes),
   }));
+  await history.recordImpressions(userId, recommendations, { algorithm: 'personal_v2' });
   res.json({ items: recommendations, recommendations, fromCache: false,
     message: generated.length ? undefined : 'Оцените как минимум два просмотренных фильма, чтобы получить персональные рекомендации.' });
 }

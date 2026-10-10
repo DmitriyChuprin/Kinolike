@@ -1,141 +1,5 @@
 // Детальная страница фильма/сериала
 
-// ===== Plyr video player (with position memory) =====
-const VideoPlayer = {
-  _key(url, title) {
-    const raw = (title || '') + url;
-    let hash = 0;
-    for (let i = 0; i < raw.length; i++) {
-      hash = ((hash << 5) - hash + raw.charCodeAt(i)) | 0;
-    }
-    return 'vp_' + Math.abs(hash).toString(36);
-  },
-
-  open(url, title, { tmdbId, mediaType, posterPath } = {}) {
-    const overlay = document.getElementById('videoPlayerOverlay');
-    const video = document.getElementById('videoPlayerElement');
-    const titleEl = document.getElementById('videoPlayerTitle');
-
-    this._stopTracking();
-    this._lastKey = this._key(url, title);
-    this._tmdbId = tmdbId || null;
-    this._mediaType = mediaType || null;
-    this._title = title || '';
-    this._posterPath = posterPath || '';
-    titleEl.textContent = title || '';
-    video.src = url;
-    video.load();
-
-    // Restore: try localStorage first, then server
-    const localKey = this._key(url, title);
-    const savedPos = localStorage.getItem(localKey);
-
-    if (savedPos && parseFloat(savedPos) > 1) {
-      this._applyRestore(video, titleEl, parseFloat(savedPos));
-    } else if (tmdbId && mediaType) {
-      // Fetch from server (async)
-      API.watchPositions.get().then(data => {
-        const items = data.items || [];
-        const match = items.find(i => i.tmdb_id == tmdbId && i.media_type === mediaType);
-        if (match && match.position > 1) {
-          this._applyRestore(video, titleEl, match.position);
-        }
-      }).catch(() => {});
-    }
-
-    overlay.classList.add('active');
-    this.player.play().catch(() => {});
-
-    // Save on pause and periodically
-    this._saveInterval = setInterval(() => {
-      this._savePosition(video, this._lastKey);
-    }, 5000);
-
-    // Also save on pause
-    this._pauseHandler = () => {
-      this._savePosition(video, this._lastKey);
-    };
-    video.addEventListener('pause', this._pauseHandler);
-  },
-
-  _applyRestore(video, titleEl, position) {
-    const resumeNote = document.createElement('span');
-    resumeNote.className = 'video-resume-note';
-    resumeNote.textContent = ` ▶ с ${this._fmtTime(position)}`;
-    titleEl.appendChild(resumeNote);
-    video.addEventListener('loadedmetadata', () => {
-      video.currentTime = Math.min(position, video.duration || position);
-    }, { once: true });
-  },
-
-  close() {
-    const overlay = document.getElementById('videoPlayerOverlay');
-    const video = document.getElementById('videoPlayerElement');
-    // Save final position
-    this._savePosition(video, this._lastKey);
-    overlay.classList.remove('active');
-    this.player.pause();
-    // Повторно сохраняем после pause: Plyr может обновить currentTime
-    // только в момент остановки воспроизведения.
-    this._savePosition(video, this._lastKey);
-    video.removeAttribute('src');
-    video.load();
-    this._stopTracking();
-  },
-
-  _fmtTime(s) {
-    if (!Number.isFinite(s) || s < 0) return '0:00';
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = Math.floor(s % 60);
-    return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` : `${m}:${String(sec)}`;
-  },
-
-  _savePosition(video, key) {
-    const position = Number(video?.currentTime);
-    if (key && Number.isFinite(position) && position > 0) {
-      // localStorage (fallback)
-      localStorage.setItem(key, String(position));
-
-      // Server (if we have tmdb context)
-      if (this._tmdbId && this._mediaType) {
-        const duration = Number(video?.duration) || 0;
-        API.watchPositions.save(
-          this._tmdbId, this._mediaType, position, duration,
-          this._title, this._posterPath
-        ).catch(() => {}); // fire-and-forget
-      }
-    }
-  },
-
-  _stopTracking() {
-    const video = document.getElementById('videoPlayerElement');
-    if (this._saveInterval) clearInterval(this._saveInterval);
-    if (this._pauseHandler && video) video.removeEventListener('pause', this._pauseHandler);
-    this._saveInterval = null;
-    this._pauseHandler = null;
-  },
-
-  init() {
-    const video = document.getElementById('videoPlayerElement');
-    if (!video || !window.Plyr) return;
-    this.player = new Plyr(video, {
-      controls: ['play-large', 'rewind', 'play', 'fast-forward', 'progress', 'current-time', 'duration', 'mute', 'volume', 'settings', 'pip', 'airplay', 'fullscreen'],
-      seekTime: 10,
-      settings: ['speed'],
-      speed: { selected: 1, options: [0.75, 1, 1.25, 1.5, 2] },
-      i18n: { rewind: 'Назад на {seektime} сек.', fastForward: 'Вперёд на {seektime} сек.' },
-    });
-  },
-};
-
-// Init close button
-document.getElementById('videoPlayerClose')?.addEventListener('click', () => VideoPlayer.close());
-document.getElementById('videoPlayerOverlay')?.addEventListener('click', (e) => {
-  if (e.target === e.currentTarget) VideoPlayer.close();
-});
-VideoPlayer.init();
-
 const Detail = {
   async render(path) {
     const app = document.getElementById('app');
@@ -185,8 +49,15 @@ const Detail = {
       const credits = details.credits || {};
       const cast = (credits.cast || []).slice(0, 10);
       
-      const videos = details.videos || {};
-      const trailer = (videos.results || []).find(v => v.type === 'Trailer' && v.site === 'YouTube');
+      // Trailer selection lives on the backend: it can use all configured providers
+      // and cache the best result rather than exposing TMDB's first YouTube item.
+      let trailer = null;
+      try {
+        const trailerResult = await API.trailers.get(type, id);
+        trailer = trailerResult.trailer;
+      } catch (error) {
+        console.warn('Не удалось найти трейлер:', error.message);
+      }
       
       let currentStatus = null;
       let listItemId = null;
@@ -231,7 +102,7 @@ const Detail = {
               : `<div style="width:100%;aspect-ratio:2/3;background:var(--bg-tertiary);border-radius:var(--radius-lg);display:flex;align-items:center;justify-content:center;font-size:3rem">🎬</div>`
             }
           </div>
-          
+
           <div class="detail-info">
             <h1 class="detail-title">${title}</h1>
             ${originalTitle && originalTitle !== title ? `<div class="detail-original-title">${originalTitle}</div>` : ''}
@@ -258,15 +129,6 @@ const Detail = {
                 + Добавить
               </button>
 
-              <button class="btn btn-sm btn-secondary detail-phantom-btn" id="phantomWatchBtn"
-                      data-type="${type}" data-title="${UI.escapeHtml(title)}"
-                      data-original-title="${UI.escapeHtml(originalTitle)}"
-                      data-id="${id}" data-year="${year}"
-                      style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;white-space:nowrap">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M8 5v14l11-7z"/>
-                </svg>
-                Смотреть в VK
               </button>
 
               ${jellyfinUrl ? `
@@ -314,7 +176,7 @@ const Detail = {
             <h3>Трейлер</h3>
             <div class="trailer-container" id="trailerContainer">
               <div id="trailerPlayer" style="position:relative;width:100%;padding-top:56.25%;background:#000;border-radius:var(--radius-lg);overflow:hidden">
-                <iframe id="trailerFrame" src="https://www.youtube.com/embed/${trailer.key}?rel=0&modestbranding=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:none" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe>
+                <iframe id="trailerFrame" src="${trailer.embedUrl}${trailer.source === 'youtube' ? `&origin=${encodeURIComponent(location.origin)}&widget_referrer=${encodeURIComponent(location.origin)}` : ''}" referrerpolicy="strict-origin-when-cross-origin" style="position:absolute;top:0;left:0;width:100%;height:100%;border:none" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe>
               </div>
               <script>
                 (function(){
@@ -322,7 +184,10 @@ const Detail = {
                   if(!frame) return;
                   frame.onerror = function(){
                     var c = document.getElementById('trailerContainer');
-                    c.innerHTML = '<a href="https://www.youtube.com/watch?v=${trailer.key}" target="_blank" rel="noopener" style="display:block;text-decoration:none"><img src="https://img.youtube.com/vi/${trailer.key}/hqdefault.jpg" alt="Трейлер" style="width:100%;border-radius:var(--radius-lg)"></a>';
+                    API.trailers.unavailable('${type}', '${id}', ${JSON.stringify({ source: trailer.source, videoId: trailer.videoId })}).then(function(result) {
+                      if (result.found && result.trailer && result.trailer.embedUrl) { frame.src = result.trailer.embedUrl; return; }
+                      c.innerHTML = '<p style="padding:16px">Трейлер не найден</p>';
+                    }).catch(function() { c.innerHTML = '<a href="${trailer.url}" target="_blank" rel="noopener" style="display:block;padding:16px">Открыть трейлер</a>'; });
                   };
                 })();
               </script>
@@ -332,8 +197,7 @@ const Detail = {
       `;
       
       this.initStatusButtonEvents(type, id, title);
-      this.initAddButton();
-      this.initPhantomButton(type, id, title, originalTitle, year, details.poster_path);
+      this.initAddButton(type === 'tv' ? details.number_of_seasons : null);
       this.initCastClickEvents();
       this.initJellyfinRefreshButton(type, id);
       
@@ -402,7 +266,7 @@ const Detail = {
   },
 
   // ===== Кнопка "Добавить" =====
-  initAddButton() {
+  initAddButton(numberOfSeasons) {
     const btn = document.querySelector('.detail-add-btn');
     if (!btn) return;
 
@@ -411,350 +275,88 @@ const Detail = {
       const type = btn.dataset.type;
       const poster = btn.dataset.poster;
       const year = btn.dataset.year;
-      this.openAddModal(title, type, poster, year);
+      this.openAddModal(title, type, poster, year, numberOfSeasons);
     });
   },
 
-  // ===== Кнопка "Смотреть в VK" (VkMovie) =====
-  initPhantomButton(type, id, title, originalTitle, year, posterPath) {
-    const btn = document.getElementById('phantomWatchBtn');
-    if (!btn) return;
-
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      btn.innerHTML = `
-        <div class="spinner" style="width:14px;height:14px;border-width:2px"></div>
-        Поиск...
-      `;
-
-      try {
-        const result = await API.vkvideo.search(title || originalTitle, year);
-
-        if (!result.results || result.results.length === 0) {
-          UI.toast('Видео не найдено', 'error');
-          btn.disabled = false;
-          btn.innerHTML = `
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M8 5v14l11-7z"/>
-            </svg>
-            Смотреть в VK
-          `;
-          return;
-        }
-
-        this.openVkMoviePicker(result.results, title || originalTitle, { tmdbId: id, mediaType: type, posterPath });
-        // Restore button after picker shown
-        btn.disabled = false;
-        btn.innerHTML = `
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M8 5v14l11-7z"/>
-          </svg>
-          Смотреть в VK
-        `;
-      } catch (err) {
-        console.error('[VkMovie] search error:', err);
-        UI.toast('Ошибка поиска: ' + err.message, 'error');
-        btn.disabled = false;
-        btn.innerHTML = `
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M8 5v14l11-7z"/>
-          </svg>
-          Смотреть в VK
-        `;
-      }
-    });
-  },
-
-  /**
-   * Show video picker modal for VkMovie results
-   */
-  openVkMoviePicker(results, displayTitle, ctx = {}) {
-    const items = results.map(r => {
-      const quals = r.qualities.map(q => q.quality).join(', ');
-      return `
-        <div class="online-results-list" style="display:flex;align-items:center;gap:10px;padding:10px;border-bottom:1px solid var(--border);cursor:pointer" 
-             data-url="${UI.escapeHtml(r.qualities[0].url)}" data-title="${UI.escapeHtml(r.title)}">
-          <div style="flex:1;min-width:0">
-            <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${UI.escapeHtml(r.title)}</div>
-            <div style="font-size:0.8rem;color:var(--text-secondary)">${quals} · ${Math.round(r.duration/60)} мин</div>
-          </div>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style="color:var(--primary);flex-shrink:0">
-            <path d="M8 5v14l11-7z"/>
-          </svg>
-        </div>`;
-    }).join('');
-
-    const html = `
-      <div style="max-width:600px;width:100%">
-        <h3 class="modal-title" style="margin-bottom:12px">${UI.escapeHtml(displayTitle)}</h3>
-        <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:12px">${results.length} вариантов</p>
-        <div style="max-height:60vh;overflow-y:auto">${items}</div>
-      </div>`;
-
-    UI.modal.open(html);
-
-    document.querySelectorAll('.online-results-list[data-url]').forEach(el => {
-      el.addEventListener('click', () => {
-        const rawUrl = el.dataset.url;
-        const title = el.dataset.title;
-        UI.modal.close();
-        const proxyUrl = `/api/vkvideo/proxy?url=${encodeURIComponent(rawUrl)}`;
-        VideoPlayer.open(proxyUrl, title, {
-          tmdbId: ctx.tmdbId,
-          mediaType: ctx.mediaType,
-          posterPath: ctx.posterPath,
-        });
-      });
-    });
-  },
-
-  /**
-   * Show content picker modal for Phantom results
-   */
-  openPhantomPicker(result, displayTitle) {
-    const { tokenMovie, content } = result;
-
-    if (content.type === 'movie') {
-      // Movie — show translation picker, then play
-      if (content.translations.length === 1) {
-        // Single translation — play directly
-        this.openPhantomStream(tokenMovie, content.translations[0].id, displayTitle);
-        return;
-      }
-
-      const html = `
-        <div style="padding:20px">
-          <h3 class="modal-title" style="margin-bottom:12px">${UI.escapeHtml(displayTitle)}</h3>
-          <p style="color:var(--text-secondary);margin-bottom:16px;font-size:0.9rem">Выберите озвучку:</p>
-          <div class="online-results-list">
-            ${content.translations.map((t, i) => `
-              <div class="online-result-item" data-index="${i}" style="cursor:pointer">
-                <div class="online-result-info">
-                  <div class="online-result-title">${UI.escapeHtml(t.name)}</div>
-                  <div class="online-result-meta">
-                    ${t.quality ? `<span class="online-badge">${t.quality}</span>` : ''}
-                    ${t.uhd ? '<span class="online-badge">2160p</span>' : ''}
-                  </div>
-                </div>
-                <button class="btn btn-sm btn-primary online-play-btn" data-index="${i}">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                </button>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      `;
-
-      UI.modal.open(html);
-      document.querySelectorAll('#modalContent .online-play-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const idx = parseInt(btn.dataset.index);
-          this.openPhantomStream(tokenMovie, content.translations[idx].id, displayTitle);
-        });
-      });
-      return;
-    }
-
-    // Serial — show season/episode picker
-    this.openPhantomSerialPicker(result, displayTitle);
-  },
-
-  /**
-   * Show serial picker with seasons, episodes, translations
-   */
-  openPhantomSerialPicker(result, displayTitle) {
-    const { tokenMovie, content } = result;
-    const seasons = content.seasons || {};
-    const seasonKeys = Object.keys(seasons).sort((a, b) => {
-      const na = parseInt(a) || 0;
-      const nb = parseInt(b) || 0;
-      return na - nb;
-    });
-
-    if (seasonKeys.length === 0) {
-      UI.toast('Сезоны не найдены', 'error');
-      return;
-    }
-
-    this._phantomResult = result;
-    this._phantomDisplayTitle = displayTitle;
-    this._phantomCurrentSeason = seasonKeys[0];
-
-    this._renderPhantomSeason(seasonKeys[0]);
-  },
-
-  _renderPhantomSeason(seasonKey) {
-    const result = this._phantomResult;
-    const displayTitle = this._phantomDisplayTitle;
-    const { tokenMovie, content } = result;
-    const seasons = content.seasons;
-    const seasonKeys = Object.keys(seasons).sort((a, b) => (parseInt(a) || 0) - (parseInt(b) || 0));
-
-    const translations = Object.keys(seasons[seasonKey] || {}).sort();
-    const episodes = seasons[seasonKey]?.[translations[0]] || [];
-
-    const seasonTabs = seasonKeys.map(sk => `
-      <button class="phantom-season-tab ${sk === seasonKey ? 'active' : ''}"
-              data-season="${sk}"
-              style="padding:6px 12px;border:1px solid var(--border-color);border-radius:var(--radius);
-                     background:${sk === seasonKey ? 'var(--accent)' : 'var(--bg-secondary)'};
-                     color:${sk === seasonKey ? '#fff' : 'var(--text-primary)'};
-                     cursor:pointer;font-size:0.85rem">
-        ${sk} сезон
-      </button>
-    `).join('');
-
-    const transButtons = translations.map((t, i) => `
-      <button class="phantom-trans-tab ${i === 0 ? 'active' : ''}" data-voice="${UI.escapeHtml(t)}"
-              style="padding:4px 10px;border:1px solid var(--border-color);border-radius:var(--radius);
-                     background:${i === 0 ? 'var(--accent)' : 'var(--bg-secondary)'};
-                     color:${i === 0 ? '#fff' : 'var(--text-primary)'};
-                     cursor:pointer;font-size:0.8rem">
-        ${UI.escapeHtml(t)}
-      </button>
-    `).join('');
-
-    const epList = episodes.map(ep => `
-      <div class="online-result-item" data-id="${ep.id}" style="cursor:pointer">
-        <div class="online-result-info">
-          <div class="online-result-title">${ep.episode} серия</div>
-        </div>
-        <button class="btn btn-sm btn-primary phantom-play-ep" data-id="${ep.id}">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        </button>
-      </div>
-    `).join('');
-
-    const html = `
-      <div style="padding:20px;max-height:70vh;overflow-y:auto">
-        <h3 class="modal-title" style="margin-bottom:12px">${UI.escapeHtml(displayTitle)}</h3>
-
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">${seasonTabs}</div>
-        <div id="phantomTransWrap" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">${transButtons}</div>
-
-        <div id="phantomEpisodes" class="online-results-list">
-          ${epList}
-        </div>
-      </div>
-    `;
-
-    UI.modal.open(html);
-
-    // Season tabs
-    document.querySelectorAll('.phantom-season-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        this._phantomCurrentSeason = tab.dataset.season;
-        this._renderPhantomSeason(tab.dataset.season);
-      });
-    });
-
-    // Translation tabs
-    document.querySelectorAll('.phantom-trans-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        const voice = tab.dataset.voice;
-        document.querySelectorAll('.phantom-trans-tab').forEach(b => {
-          b.style.background = 'var(--bg-secondary)';
-          b.style.color = 'var(--text-primary)';
-          b.classList.remove('active');
-        });
-        tab.style.background = 'var(--accent)';
-        tab.style.color = '#fff';
-        tab.classList.add('active');
-
-        const episodes = seasons[seasonKey]?.[voice] || [];
-        const epListEl = document.getElementById('phantomEpisodes');
-        if (epListEl) {
-          epListEl.innerHTML = episodes.map(ep => `
-            <div class="online-result-item" data-id="${ep.id}" style="cursor:pointer">
-              <div class="online-result-info">
-                <div class="online-result-title">${ep.episode} серия</div>
-              </div>
-              <button class="btn btn-sm btn-primary phantom-play-ep" data-id="${ep.id}">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-              </button>
-            </div>
-          `).join('');
-          this._initPhantomEpButtons(tokenMovie, displayTitle);
-        }
-      });
-    });
-
-    this._initPhantomEpButtons(tokenMovie, displayTitle);
-  },
-
-  _initPhantomEpButtons(tokenMovie, displayTitle) {
-    document.querySelectorAll('.phantom-play-ep').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const idFile = btn.dataset.id;
-        this.openPhantomStream(tokenMovie, idFile, displayTitle);
-      });
-    });
-  },
-
-  /**
-   * Fetch stream URLs and open the HLS player
-   */
-  async openPhantomStream(tokenMovie, idFile, displayTitle) {
-    UI.modal.close();
-
-    // Show loading in a temporary modal
-    const loadingHtml = `
-      <div style="text-align:center;padding:40px">
-        <div class="loading-spinner"><div class="spinner"></div></div>
-        <p style="color:var(--text-secondary);margin-top:12px">Загрузка стрима...</p>
-      </div>`;
-    UI.modal.open(loadingHtml);
-
-    try {
-      const result = await API.phantom.stream(tokenMovie, idFile);
-
-      if (!result.streams || result.streams.length === 0) {
-        UI.modal.close();
-        UI.toast('Стримы не найдены', 'error');
-        return;
-      }
-
-      UI.modal.close();
-
-      // Open player
-      const proxyUrl = result.streams[0].proxyUrl;
-      VideoPlayer.open(proxyUrl, displayTitle);
-
-    } catch (err) {
-      UI.modal.close();
-      console.error('[Phantom] stream error:', err);
-      UI.toast('Ошибка загрузки стрима: ' + err.message, 'error');
-    }
-  },
-
-  openAddModal(title, type, poster, year) {
+  openAddModal(title, type, poster, year, numberOfSeasons) {
     this._addTitle = title;
     this._addPoster = poster;
     this._addYear = year;
     this._addType = type;
+    this._addSeason = 1;
 
-    const searchQuery = year ? `${title} (${year})` : title;
+    const baseQuery = year ? `${title} (${year})` : title;
 
-    const html = `
-      <div class="online-modal">
-        <h3 class="modal-title">+ Добавить в TorrServer</h3>
-        <p style="color:var(--text-secondary);margin-bottom:16px;font-size:0.9rem">
-          Поиск торрента: <strong>${UI.escapeHtml(searchQuery)}</strong>
-        </p>
-        
-        <div id="addSearchStatus" style="text-align:center;padding:20px">
-          <div class="loading-spinner"><div class="spinner"></div></div>
-          <p style="color:var(--text-secondary);margin-top:8px">Поиск...</p>
+    // Для сериалов — выбор сезона
+    if (type === 'tv') {
+      const maxSeason = numberOfSeasons || 10;
+      const html = `
+        <div class="online-modal">
+          <h3 class="modal-title">+ Добавить в TorrServer</h3>
+          <p style="color:var(--text-secondary);margin-bottom:12px;font-size:0.9rem">
+            <strong>${UI.escapeHtml(title)}</strong>
+          </p>
+
+          <div style="margin-bottom:16px">
+            <label style="display:block;color:var(--text-secondary);font-size:0.85rem;margin-bottom:6px">
+              Выберите сезон:
+            </label>
+            <select id="addSeasonSelect" style="
+              width:100%;padding:8px 12px;border-radius:var(--radius);
+              background:var(--bg-tertiary);color:var(--text-primary);
+              border:1px solid var(--border);font-size:0.95rem;
+            ">
+              ${Array.from({length: maxSeason}, (_, i) => i + 1).map(n =>
+                `<option value="${n}" ${n === 1 ? 'selected' : ''}>Сезон ${n}</option>`
+              ).join('')}
+            </select>
+          </div>
+
+          <div id="addSearchStatus" style="text-align:center;padding:20px">
+            <div class="loading-spinner"><div class="spinner"></div></div>
+            <p style="color:var(--text-secondary);margin-top:8px">Поиск...</p>
+          </div>
+
+          <div id="addResults" style="display:none"></div>
         </div>
-        
-        <div id="addResults" style="display:none"></div>
-      </div>
-    `;
+      `;
 
-    UI.modal.open(html);
-    this.searchForAdd(searchQuery, type);
+      UI.modal.open(html);
+
+      // Стартовый поиск с сезоном 1
+      this.searchForAdd(`${baseQuery} S01`, type);
+
+      // При смене сезона — повторный поиск
+      document.getElementById('addSeasonSelect').addEventListener('change', (e) => {
+        const season = parseInt(e.target.value);
+        this._addSeason = season;
+        const padded = String(season).padStart(2, '0');
+        this.searchForAdd(`${baseQuery} S${padded}`, type);
+      });
+    } else {
+      // Фильмы — как раньше
+      const searchQuery = baseQuery;
+
+      const html = `
+        <div class="online-modal">
+          <h3 class="modal-title">+ Добавить в TorrServer</h3>
+          <p style="color:var(--text-secondary);margin-bottom:16px;font-size:0.9rem">
+            Поиск торрента: <strong>${UI.escapeHtml(searchQuery)}</strong>
+          </p>
+
+          <div id="addSearchStatus" style="text-align:center;padding:20px">
+            <div class="loading-spinner"><div class="spinner"></div></div>
+            <p style="color:var(--text-secondary);margin-top:8px">Поиск...</p>
+          </div>
+
+          <div id="addResults" style="display:none"></div>
+        </div>
+      `;
+
+      UI.modal.open(html);
+      this.searchForAdd(searchQuery, type);
+    }
   },
 
   async searchForAdd(query, type) {

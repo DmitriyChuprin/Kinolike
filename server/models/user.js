@@ -23,12 +23,12 @@ const UserModel = {
 
   async findById(id) {
     const { rows } = await db.query(
-      'SELECT id, username, email, avatar_url, created_at FROM users WHERE id = $1', [id]
+      'SELECT id, username, email, avatar_url, is_admin, jellyfin_enabled, preferred_streaming_source, created_at FROM users WHERE id = $1', [id]
     );
     return rows[0] || null;
   },
 
-  async updateProfile(id, { username, email, avatar_url }) {
+  async updateProfile(id, { username, email, avatar_url, preferred_streaming_source }) {
     const fields = [];
     const values = [];
     let idx = 1;
@@ -36,6 +36,7 @@ const UserModel = {
     if (username !== undefined) { fields.push(`username = $${idx++}`); values.push(username); }
     if (email !== undefined) { fields.push(`email = $${idx++}`); values.push(email); }
     if (avatar_url !== undefined) { fields.push(`avatar_url = $${idx++}`); values.push(avatar_url); }
+    if (preferred_streaming_source !== undefined) { fields.push(`preferred_streaming_source = $${idx++}`); values.push(preferred_streaming_source); }
 
     if (fields.length === 0) return null;
 
@@ -46,6 +47,21 @@ const UserModel = {
   async updatePassword(id, newPassword) {
     const hash = bcrypt.hashSync(newPassword, 10);
     return db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, id]);
+  },
+
+  async listForAdmin() {
+    const { rows } = await db.query(
+      'SELECT id, username, email, avatar_url, is_admin, jellyfin_enabled, preferred_streaming_source, created_at FROM users ORDER BY created_at DESC'
+    );
+    return rows;
+  },
+
+  async setJellyfinEnabled(id, enabled) {
+    const { rows } = await db.query(
+      'UPDATE users SET jellyfin_enabled = $1 WHERE id = $2 RETURNING id, username, email, avatar_url, is_admin, jellyfin_enabled, preferred_streaming_source, created_at',
+      [enabled, id]
+    );
+    return rows[0] || null;
   },
 
   verifyPassword(plainPassword, hash) {

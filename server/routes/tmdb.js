@@ -3,6 +3,9 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 const tmdbService = require('../services/tmdb');
+const { summarizeReviews } = require('../services/ai');
+const reviewSummaryModel = require('../models/reviewSummary');
+const catalogService = require('../services/catalog').createCatalogService(tmdbService.tmdbRequest);
 const { optionalAuth } = require('../middleware/auth');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const fetch = require('node-fetch');
@@ -113,20 +116,17 @@ router.get('/image', async (req, res) => {
   }
 });
 
-// Поиск
-router.get('/search', async (req, res) => {
-  try {
-    const { query, type, page } = req.query;
-    if (!query) {
-      return res.status(400).json({ error: 'query обязателен' });
+// Public catalog and search share the same pagination contract.
+for (const name of ['search', 'catalog']) {
+  router.get(`/${name}`, async (req, res) => {
+    try {
+      res.json(await catalogService[name](req.query));
+    } catch (err) {
+      console.error(`Ошибка TMDB ${name}:`, err.message);
+      res.status(err.status || 502).json({ error: err.status ? err.message : 'Не удалось загрузить каталог. Попробуйте ещё раз.' });
     }
-    const result = await tmdbService.search(query, type || 'multi', page || 1);
-    res.json(result);
-  } catch (err) {
-    console.error('Ошибка TMDB поиска:', err);
-    res.status(502).json({ error: 'Ошибка TMDB API' });
-  }
-});
+  });
+}
 
 // Популярные фильмы
 router.get('/movie/popular', async (req, res) => {
@@ -258,14 +258,60 @@ router.get('/movie/:id/similar', async (req, res) => {
   }
 });
 
-// Видео фильма
-router.get('/movie/:id/videos', async (req, res) => {
+async function sendReviewSummary(mediaType, req, res) {
   try {
-    const result = await tmdbService.tmdbRequest(`/movie/${req.params.id}/videos`);
-    res.json(result);
+    const id = req.params.id;
+    const cached = await reviewSummaryModel.find(id, mediaType);
+    if (cached) {
+      return res.json({
+        summary: cached.summary,
+        sourceCount: cached.source_count,
+        language: cached.source_language || '',
+        cached: true,
+        generatedAt: cached.generated_at,
+      });
+    }
+
+    const [details, reviewData] = await Promise.all([
+      mediaType === 'movie' ? tmdbService.getMovieDetails(id) : tmdbService.getTvDetails(id),
+      tmdbService.getReviews(mediaType, id),
+    ]);
+    const title = details.title || details.name || 'Без названия';
+    const date = details.release_date || details.first_air_date || '';
+    const result = await summarizeReviews({
+      title,
+      year: String(date).slice(0, 4),
+      mediaType,
+      reviews: reviewData.results || [],
+    });
+    if (result.summary) {
+      const saved = await reviewSummaryModel.save(id, mediaType, {
+        ...result,
+        language: reviewData.language || '',
+      });
+      return res.json({
+        summary: saved.summary,
+        sourceCount: saved.source_count,
+        language: saved.source_language || '',
+        cached: false,
+        generatedAt: saved.generated_at,
+      });
+    }
+    res.json({ ...result, language: reviewData.language || '', cached: false });
   } catch (err) {
-    console.error('Ошибка TMDB:', err);
-    res.status(502).json({ error: 'Ошибка TMDB API' });
+    console.error('Ошибка AI-сводки отзывов:', err.message);
+    res.status(503).json({ error: 'AI-сводка отзывов временно недоступна' });
+  }
+}
+
+router.get('/movie/:id/review-summary', (req, res) => sendReviewSummary('movie', req, res));
+
+router.get('/movie/:id/reviews', async (req, res) => {
+  try {
+    res.json(await tmdbService.getReviews('movie', req.params.id));
+  } catch (err) {
+    console.error('Ошибка отзывов TMDB:', err);
+    res.status(502).json({ error: 'Не удалось загрузить отзывы' });
   }
 });
 
@@ -324,14 +370,14 @@ router.get('/tv/:id/similar', async (req, res) => {
   }
 });
 
-// Видео сериала
-router.get('/tv/:id/videos', async (req, res) => {
+router.get('/tv/:id/review-summary', (req, res) => sendReviewSummary('tv', req, res));
+
+router.get('/tv/:id/reviews', async (req, res) => {
   try {
-    const result = await tmdbService.tmdbRequest(`/tv/${req.params.id}/videos`);
-    res.json(result);
+    res.json(await tmdbService.getReviews('tv', req.params.id));
   } catch (err) {
-    console.error('Ошибка TMDB:', err);
-    res.status(502).json({ error: 'Ошибка TMDB API' });
+    console.error('Ошибка отзывов TMDB:', err);
+    res.status(502).json({ error: 'Не удалось загрузить отзывы' });
   }
 });
 
@@ -372,17 +418,29 @@ router.get('/genres', async (req, res) => {
 
 // ===== Актёр =====
 // Детали актёра + фильмы + сериалы за один запрос
-router.get('/person/:id', async (req, res) => {
+router.get('/person/:id', optionalAuth, async (req, res) => {
   try {
     const [person, movieCredits, tvCredits] = await Promise.all([
       tmdbService.getPersonDetails(req.params.id),
       tmdbService.getPersonMovieCredits(req.params.id),
       tmdbService.getPersonTvCredits(req.params.id),
     ]);
+    const imdbService = require('../services/imdb');
+    const movieCast = movieCredits.cast || [];
+    const tvCast = tvCredits.cast || [];
+    const imdb = await imdbService.getPersonFilmography(
+      person,
+      movieCast,
+      tvCast,
+      req.user?.id || null,
+    );
     res.json({
       ...person,
       movie_credits: movieCredits,
       tv_credits: tvCredits,
+      imdb_id: imdb.imdb_id,
+      known_works: imdb.known_works,
+      filmography: imdb.filmography,
     });
   } catch (err) {
     console.error('Ошибка TMDB person:', err);
@@ -407,6 +465,37 @@ router.delete('/metadata/:type/:id', async (req, res) => {
   } catch (err) {
     console.error('Ошибка удаления метаданных:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── TMDB Sync endpoints ─────────────────────────────────────────────────────
+
+const { runSync, getLastSyncTime } = require('../services/tmdbSyncService');
+
+// GET /api/tmdb/sync/status — sync history and status
+router.get('/sync/status', async (req, res) => {
+  try {
+    const db = require('../db/database');
+    const history = await db.query(
+      'SELECT * FROM tmdb_sync_history ORDER BY started_at DESC LIMIT 10'
+    );
+    const lastSync = await getLastSyncTime();
+    res.json({ lastSuccessfulSync: lastSync, history: history.rows });
+  } catch (err) {
+    console.error('[TMDB Sync] Status error:', err);
+    res.status(500).json({ error: 'Ошибка получения статуса синхронизации' });
+  }
+});
+
+// POST /api/tmdb/sync/run — manual trigger
+router.post('/sync/run', async (req, res) => {
+  try {
+    console.log('[TMDB Sync] Manual sync triggered');
+    const stats = await runSync();
+    res.json({ success: true, stats });
+  } catch (err) {
+    console.error('[TMDB Sync] Manual sync error:', err);
+    res.status(500).json({ error: 'Ошибка синхронизации: ' + err.message });
   }
 });
 

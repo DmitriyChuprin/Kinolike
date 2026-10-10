@@ -1,0 +1,104 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "KinoLike Hermes API",
+    "version": "1.0.0",
+    "description": "Token-authenticated API for personalized recommendations and the configured KinoLike user's media library."
+  },
+  "servers": [{ "url": "/api/v1" }],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/recommendations": {
+      "post": {
+        "summary": "Get personalized recommendations",
+        "description": "Parses the natural-language request, applies optional strict filters, obtains a bounded candidate set and ranks it inside KinoLike. Watched media is excluded by default.",
+        "operationId": "getRecommendations",
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecommendationRequest" }, "examples": { "scienceFiction": { "value": { "query": "Посоветуй хороший фантастический фильм на вечер", "limit": 10 } }, "structured": { "value": { "query": "что-нибудь интересное на вечер", "media_type": "movie", "genres": ["science-fiction"], "year_from": 2020, "year_to": 2026, "max_runtime": 150, "min_rating": 6.5, "min_vote_count": 500, "watchlist_only": false, "exclude_watched": true, "limit": 10 } }, "context": { "value": { "query": "что-нибудь посмотреть вечером", "context": { "mood": "relaxed", "watching_with": "alone", "available_minutes": 120 } } } } } } },
+        "responses": { "200": { "description": "Ranked recommendations", "content": { "application/json": { "schema": { "type": "object", "required": ["recommendations"], "properties": { "recommendations": { "type": "array", "items": { "$ref": "#/components/schemas/Recommendation" } } } } } } }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "422": { "$ref": "#/components/responses/Validation" }, "429": { "$ref": "#/components/responses/RateLimited" }, "500": { "$ref": "#/components/responses/Internal" } }
+      }
+    },
+    "/profile/preferences": {
+      "get": {
+        "summary": "Get an aggregated taste profile",
+        "operationId": "getPreferenceProfile",
+        "responses": { "200": { "description": "Preference profile without account PII", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PreferenceProfile" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "429": { "$ref": "#/components/responses/RateLimited" }, "500": { "$ref": "#/components/responses/Internal" } }
+      }
+    },
+    "/search": {
+      "get": {
+        "summary": "Search KinoLike's local catalog",
+        "description": "Searches local metadata first and uses the existing TMDB search as a fallback unless tmdb_fallback=false.",
+        "operationId": "searchMedia",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string", "minLength": 2, "maxLength": 200 }, "example": "Дюна 2" },
+          { "name": "media_type", "in": "query", "schema": { "$ref": "#/components/schemas/MediaType" } },
+          { "name": "year", "in": "query", "description": "Optional release year for disambiguation", "schema": { "type": "integer", "minimum": 1880, "maximum": 2200 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 } },
+          { "name": "tmdb_fallback", "in": "query", "schema": { "type": "boolean", "default": true } }
+        ],
+        "responses": { "200": { "description": "Search results and their source", "content": { "application/json": { "schema": { "type": "object", "required": ["items", "source"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Media" } }, "source": { "type": "string", "enum": ["local", "tmdb"] } } } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "422": { "$ref": "#/components/responses/Validation" }, "429": { "$ref": "#/components/responses/RateLimited" }, "500": { "$ref": "#/components/responses/Internal" } }
+      }
+    },
+    "/media/{id}": {
+      "get": {
+        "summary": "Get local media details and user status",
+        "operationId": "getMedia",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "description": "Local media_metadata ID returned by search", "schema": { "type": "integer", "minimum": 1 } }],
+        "responses": { "200": { "description": "Media details", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MediaWithStatus" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "422": { "$ref": "#/components/responses/Validation" }, "429": { "$ref": "#/components/responses/RateLimited" }, "500": { "$ref": "#/components/responses/Internal" } }
+      }
+    },
+    "/watchlist": {
+      "get": {
+        "summary": "List Want to Watch items",
+        "operationId": "getWatchlist",
+        "responses": { "200": { "description": "Watchlist", "content": { "application/json": { "schema": { "type": "object", "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Media" } } } } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "429": { "$ref": "#/components/responses/RateLimited" }, "500": { "$ref": "#/components/responses/Internal" } }
+      },
+      "post": {
+        "summary": "Add media to Want to Watch",
+        "description": "Accepts a local media_id, a TMDB identity, or a title. Ambiguous title searches return 409 with candidates and never silently pick one.",
+        "operationId": "addToWatchlist",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MediaReference" }, "examples": { "byTitle": { "value": { "title": "Дюна 2", "media_type": "movie" } }, "byId": { "value": { "media_id": 123 } } } } } },
+        "responses": { "201": { "description": "Added item", "content": { "application/json": { "schema": { "type": "object", "properties": { "item": { "$ref": "#/components/schemas/Media" } } } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/Conflict" }, "422": { "$ref": "#/components/responses/Validation" }, "429": { "$ref": "#/components/responses/RateLimited" }, "500": { "$ref": "#/components/responses/Internal" } }
+      }
+    },
+    "/watchlist/{id}": {
+      "delete": {
+        "summary": "Remove media from Want to Watch",
+        "operationId": "removeFromWatchlist",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "description": "Local media_metadata ID", "schema": { "type": "integer", "minimum": 1 } }],
+        "responses": { "204": { "description": "Removed" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "422": { "$ref": "#/components/responses/Validation" }, "429": { "$ref": "#/components/responses/RateLimited" }, "500": { "$ref": "#/components/responses/Internal" } }
+      }
+    },
+    "/watched": {
+      "post": {
+        "summary": "Mark media watched or update its rating",
+        "operationId": "markWatched",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/MediaReference" }, { "type": "object", "properties": { "rating": { "type": ["integer", "null"], "minimum": 1, "maximum": 10 }, "watched_at": { "type": "string", "format": "date" } } }] }, "example": { "media_id": 123, "rating": 8, "watched_at": "2026-09-20" } } } },
+        "responses": { "200": { "description": "Saved watched item", "content": { "application/json": { "schema": { "type": "object", "properties": { "item": { "$ref": "#/components/schemas/Media" } } } } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/Conflict" }, "422": { "$ref": "#/components/responses/Validation" }, "429": { "$ref": "#/components/responses/RateLimited" }, "500": { "$ref": "#/components/responses/Internal" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "opaque API token", "description": "KINOLIKE_API_TOKEN configured on the KinoLike server" } },
+    "schemas": {
+      "MediaType": { "type": "string", "enum": ["movie", "tv"] },
+      "Media": { "type": "object", "required": ["id", "tmdb_id", "media_type", "title", "genres"], "properties": { "id": { "type": ["integer", "null"], "description": "Local ID; null only for unsaved TMDB fallback search results" }, "tmdb_id": { "type": "integer" }, "media_type": { "$ref": "#/components/schemas/MediaType" }, "title": { "type": "string" }, "original_title": { "type": ["string", "null"] }, "year": { "type": ["integer", "null"] }, "overview": { "type": "string" }, "poster_url": { "type": ["string", "null"], "format": "uri" }, "rating": { "type": ["number", "null"] }, "vote_count": { "type": "integer" }, "runtime": { "type": ["integer", "null"] }, "genres": { "type": "array", "items": { "type": "string" } } } },
+      "MediaWithStatus": { "allOf": [{ "$ref": "#/components/schemas/Media" }, { "type": "object", "properties": { "status": { "type": "object", "required": ["watched", "watchlist", "rating", "watch_date"], "properties": { "watched": { "type": "boolean" }, "watchlist": { "type": "boolean" }, "rating": { "type": ["number", "null"] }, "watch_date": { "type": ["string", "null"], "format": "date-time" } } } } }] },
+      "Recommendation": { "allOf": [{ "$ref": "#/components/schemas/Media" }, { "type": "object", "required": ["recommendation_score", "reason"], "properties": { "recommendation_score": { "type": "number", "minimum": 0, "maximum": 1 }, "reason": { "type": "string", "description": "Short user-facing explanation; never internal chain-of-thought" } } }] },
+      "RecommendationRequest": { "type": "object", "properties": { "query": { "type": "string", "maxLength": 500, "default": "Что посмотреть?" }, "media_type": { "$ref": "#/components/schemas/MediaType" }, "genres": { "type": "array", "items": { "oneOf": [{ "type": "string" }, { "type": "integer" }] } }, "year_from": { "type": "integer", "minimum": 1880, "maximum": 2200 }, "year_to": { "type": "integer", "minimum": 1880, "maximum": 2200 }, "max_runtime": { "type": "integer", "minimum": 1, "maximum": 1440 }, "min_rating": { "type": "number", "minimum": 0, "maximum": 10 }, "min_vote_count": { "type": "integer", "minimum": 0 }, "watchlist_only": { "type": "boolean", "default": false }, "exclude_watched": { "type": "boolean", "default": true }, "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }, "context": { "type": "object", "properties": { "mood": { "type": "string" }, "watching_with": { "type": "string", "examples": ["alone", "family", "friends"] }, "available_minutes": { "type": "integer", "minimum": 1, "maximum": 1440 } } } } },
+      "MediaReference": { "type": "object", "description": "Use exactly one lookup form: media_id; tmdb_id plus media_type; or title/query (media_type and year can disambiguate).", "properties": { "media_id": { "type": "integer", "minimum": 1 }, "tmdb_id": { "type": "integer", "minimum": 1 }, "media_type": { "$ref": "#/components/schemas/MediaType" }, "year": { "type": "integer", "minimum": 1880, "maximum": 2200 }, "title": { "type": "string", "minLength": 2, "maxLength": 200 }, "query": { "type": "string", "minLength": 2, "maxLength": 200 } } },
+      "PreferenceProfile": { "type": "object", "properties": { "favorite_genres": { "type": "array", "items": { "type": "object" } }, "disliked_genres": { "type": "array", "items": { "type": "object" } }, "preferred_year_range": { "type": "object" }, "favorite_actors": { "type": "array", "items": { "type": "object" } }, "favorite_directors": { "type": "array", "items": { "type": "object" } }, "high_rated_movies": { "type": "array", "items": { "type": "object" } }, "high_rated_tv": { "type": "array", "items": { "type": "object" } } } },
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "example": "MEDIA_NOT_FOUND" }, "message": { "type": "string", "example": "Media not found" }, "details": {} } } } }
+    },
+    "responses": {
+      "BadRequest": { "description": "Malformed request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "Missing or invalid bearer token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Forbidden": { "description": "API disabled or configured user unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "Media or endpoint not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Conflict": { "description": "Ambiguous lookup or incompatible library state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Validation": { "description": "Semantically invalid input", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "RateLimited": { "description": "Rate limit exceeded", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Internal": { "description": "Unexpected server error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    }
+  }
+}

@@ -158,4 +158,53 @@ async function generateReason(itemTitle, itemType, analysis, userQuery = null) {
   }
 }
 
-module.exports = { analyzePreferences, generateReason };
+/**
+ * Суммирует отзывы TMDB, не отдавая их содержимое клиенту.
+ * Постоянное хранение результата выполняется на уровне БД в route-слое.
+ */
+async function summarizeReviews({ title, year, mediaType, reviews = [] }) {
+  const sourceReviews = reviews
+    .map((review) => String(review?.content || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((content) => content.slice(0, 2800));
+
+  if (sourceReviews.length === 0) {
+    return { summary: null, sourceCount: 0 };
+  }
+
+  const reviewText = sourceReviews.map((content, index) => `Отзыв ${index + 1}: ${content}`).join('\n\n');
+  const systemPrompt = `Ты — редактор кино-сервиса. Составь короткую честную сводку общественной реакции на фильм или сериал по отзывам зрителей.
+
+Правила:
+- Используй только информацию из переданных отзывов, ничего не выдумывай.
+- Не пересказывай сюжет и не раскрывай спойлеры.
+- Выдели повторяющиеся сильные стороны, претензии и общий вывод.
+- Ответ на русском, 3 коротких абзаца с подзаголовками «Сильные стороны», «Что критикуют», «Итог».
+- Не упоминай авторов отзывов и не добавляй вступление.
+- Верни только готовый текст без markdown-обёртки.`;
+
+  const userPrompt = `Название: ${title || 'Без названия'}${year ? ` (${year})` : ''}
+Тип: ${mediaType === 'tv' ? 'сериал' : 'фильм'}
+
+Отзывы зрителей:
+${reviewText}`;
+
+  const response = await client.chat.completions.create({
+    model: MODEL,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    temperature: 0.3,
+    max_tokens: 350,
+    timeout: TIMEOUT * 1000,
+  });
+
+  const summary = response.choices[0]?.message?.content?.trim();
+  if (!summary) throw new Error('AI не вернул сводку отзывов');
+
+  return { summary, sourceCount: sourceReviews.length };
+}
+
+module.exports = { analyzePreferences, generateReason, summarizeReviews };

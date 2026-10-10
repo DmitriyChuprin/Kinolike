@@ -3,6 +3,8 @@ const RecommendationModel = require('../models/recommendation');
 const tmdb = require('./tmdb');
 const { build_user_profile, generate_recommendations } = require('./personalRecommendations');
 const config = require('./recommendationConfig');
+const tasteProfile = require('./tasteProfile');
+const recommendationHistory = require('./recommendationHistory');
 const pendingJobs = new Map();
 const runningJobs = new Set();
 
@@ -39,13 +41,18 @@ async function generateForUser(userId) {
     if (!profile.isSufficient) { await RecommendationModel.clearCache(userId); return []; }
     const candidates = await generate_candidates(profile, new Set(all.map(item => Number(item.tmdb_id))));
     const details = await mapWithLimit(candidates, 4, item => tmdb.getMovieDetails(item.id).catch(() => null));
-    const { recommendations } = generate_recommendations({ watched, candidates: details });
+    const [preferences, feedbackSignals] = await Promise.all([tasteProfile.getPreferences(userId), recommendationHistory.getFeedbackSignals(userId)]);
+    const { recommendations } = generate_recommendations({ watched, candidates: details, context: { preferences, feedbackSignals } });
     await RecommendationModel.save(userId, recommendations, Number(process.env.RECOMMENDATIONS_CACHE_TTL) || 24);
     return recommendations;
   } finally { runningJobs.delete(userId); }
 }
 function scheduleGeneration(userId) {
   if (pendingJobs.has(userId)) clearTimeout(pendingJobs.get(userId));
-  pendingJobs.set(userId, setTimeout(() => { pendingJobs.delete(userId); generateForUser(userId).catch(err => console.error('[Recommendations]', err.message)); }, Number(process.env.RECOMMENDATIONS_DEBOUNCE_MS) || 1500));
+  const timer = setTimeout(() => { pendingJobs.delete(userId); generateForUser(userId).catch(err => console.error('[Recommendations]', err.message)); }, Number(process.env.RECOMMENDATIONS_DEBOUNCE_MS) || 1500);
+  // The HTTP server keeps production alive; a pending debounce alone should
+  // not block CLI commands or isolated tests from exiting.
+  timer.unref?.();
+  pendingJobs.set(userId, timer);
 }
 module.exports = { scheduleGeneration, generateForUser, generate_candidates, runningJobs };

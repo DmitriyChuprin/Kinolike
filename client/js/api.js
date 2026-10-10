@@ -14,16 +14,25 @@ const API = {
     
     try {
       const response = await fetch(url, config);
-      const data = await response.json();
+      const contentType = response.headers.get('content-type') || '';
+      const body = await response.text();
       
       if (!response.ok) {
-        if (response.status === 401 && data.code === "INVALID_TOKEN") {
+        if (response.status === 401 && body.includes("INVALID_TOKEN")) {
           localStorage.removeItem("authToken");
         }
-        throw new Error(data.error || "Ошибка запроса");
+        throw new Error(`KinoLike API ${response.status}: ${body.slice(0, 300)}`);
       }
-      
-      return data;
+
+      if (!contentType.includes('application/json')) {
+        throw new Error(`KinoLike API returned ${contentType || 'unknown content-type'} instead of JSON: ${body.slice(0, 300)}`);
+      }
+
+      try {
+        return body ? JSON.parse(body) : {};
+      } catch (_) {
+        throw new Error(`KinoLike API returned invalid JSON: ${body.slice(0, 300)}`);
+      }
     } catch (error) {
       if (error.message === 'Failed to fetch') {
         throw new Error('Проверьте подключение к интернету');
@@ -81,6 +90,11 @@ const API = {
   },
 
   // ===== Lists =====
+  trailers: {
+    async get(mediaType, tmdbId) { return API.get(`/api/trailers/${mediaType}/${tmdbId}`); },
+    async unavailable(mediaType, tmdbId, trailer) { return API.post(`/api/trailers/${mediaType}/${tmdbId}/unavailable`, { source: trailer.source, videoId: trailer.videoId }); },
+  },
+
   lists: {
     async get(params = {}) {
       const query = new URLSearchParams(params).toString();
@@ -255,33 +269,6 @@ const API = {
     },
   },
 
-  // ===== Phantom (онлайн-источник) =====
-  phantom: {
-    async search(title, year, mediaType, tmdbId) {
-      return API.post('/api/phantom/search', { title, year, mediaType, tmdbId });
-    },
-    async stream(tokenMovie, idFile) {
-      return API.get(`/api/phantom/stream?tokenMovie=${encodeURIComponent(tokenMovie)}&idFile=${encodeURIComponent(idFile)}`);
-    },
-  },
-  vkvideo: {
-    async search(title, year) {
-      return API.post('/api/vkvideo/search', { title, year });
-    },
-  },
-
-  // ===== Watch Positions (продолжить просмотр) =====
-  watchPositions: {
-    async get() {
-      return API.get('/api/watch-positions');
-    },
-    async save(tmdb_id, media_type, position, duration, title, poster_path) {
-      return API.post('/api/watch-positions', { tmdb_id, media_type, position, duration, title, poster_path });
-    },
-    async remove(tmdbId, mediaType) {
-      return API.delete(`/api/watch-positions/${tmdbId}/${mediaType}`);
-    },
-  },
 };
 
 // Утилиты для изображений (через серверный прокси)

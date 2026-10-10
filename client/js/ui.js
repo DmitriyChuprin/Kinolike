@@ -227,9 +227,16 @@ const UI = {
 
   // ===== Навигация (активная ссылка) =====
   setActiveNav(page) {
-    document.querySelectorAll('.nav-link, .mobile-nav-link').forEach(link => {
+    document.querySelectorAll('.sidebar-link').forEach(link => {
       link.classList.toggle('active', link.dataset.page === page);
     });
+    // Also update bottom nav
+    const bottomNav = document.getElementById('bottomNav');
+    if (bottomNav) {
+      bottomNav.querySelectorAll('.bottom-nav-link').forEach(link => {
+        link.classList.toggle('active', link.dataset.page === page);
+      });
+    }
   },
 
   // ===== Экранирование HTML =====

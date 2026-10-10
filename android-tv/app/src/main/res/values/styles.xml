@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.KinoLikeTV" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#E8C76A</item>
+        <item name="android:navigationBarColor">#080A0F</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

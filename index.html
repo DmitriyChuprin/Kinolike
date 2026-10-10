@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#071322" />
+    <meta name="description" content="KinoLike — больше, чем просто фильмы" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <script>
+      (() => {
+        const preference = localStorage.getItem('kinolike-theme') || 'system';
+        const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.theme = preference === 'system' ? (dark ? 'dark' : 'light') : preference;
+        document.documentElement.dataset.themePreference = preference;
+      })();
+    </script>
+    <title>KinoLike</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

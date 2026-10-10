@@ -1,507 +1,253 @@
-// Phantom online source — Node.js port of Lampac Phantom module
-// HTTP search + iframe parsing + Playwright-based m3u8 extraction
-// All upstream requests go through SOCKS5 proxy
-const fetch = require('node-fetch');
-const { SocksProxyAgent } = require('socks-proxy-agent');
+// Lampac NextGen Phantom adapter. Lampac returns an HTML fragment with a
+// data-json attribute, so this module deliberately keeps that format private.
+const crypto = require('node:crypto');
 
-const PHANTOM_API = 'https://api.apbugall.org';
-const PHANTOM_LINK = 'https://aport-as.allarknow.online';
-const PHANTOM_TOKEN = '22c8122334d050de1bfc97bd08aa5e';
+// Lampac is installed on the LAN host, not inside the KinoLike container.
+// Deployment can override this through LAMPAC_URL without touching code.
+const LAMPAC_URL = (process.env.LAMPAC_URL || 'http://192.168.1.103:9118').replace(/\/+$/, '');
+// Keep the primary provider from delaying the reserve source for too long.
+// This is intentionally separate from any broader Lampac timeout setting.
+const TIMEOUT_MS = Math.max(1000, Number(process.env.PHANTOM_TIMEOUT_MS) || 7000);
+const DIAGNOSTICS = process.env.PHANTOM_DIAGNOSTICS === 'true';
 
-// ===== SOCKS5 proxy setup =====
-let proxyAgent = null;
-{
-  const host = process.env.TMDB_PROXY_HOST || '127.0.0.1';
-  const port = process.env.TMDB_PROXY_PORT || '1080';
-  const user = process.env.TMDB_PROXY_USERNAME;
-  const pass = process.env.TMDB_PROXY_PASSWORD;
-  if (process.env.TMDB_PROXY_ENABLED === 'true') {
-    let proxyUrl = `socks5://${host}:${port}`;
-    if (user && pass) proxyUrl = `socks5://${user}:${pass}@${host}:${port}`;
-    proxyAgent = new SocksProxyAgent(proxyUrl);
-    console.log(`[Phantom] SOCKS5 прокси: ${user ? '***@' : ''}${host}:${port}`);
-  } else {
-    console.log('[Phantom] SOCKS5 прокси отключен');
-  }
-}
-
-const FETCH_OPTIONS = {
-  timeout: 12000,
-  agent: proxyAgent || undefined,
-};
-
-// In-memory cache: key → { data, expires }
-const cache = new Map();
-
-function cacheGet(key) {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expires) { cache.delete(key); return null; }
-  return entry.data;
-}
-
-function cacheSet(key, data, ttlMs) {
-  cache.set(key, { data, expires: Date.now() + ttlMs });
-}
-
-// ===== HTTP API =====
-
-/**
- * Search by Kinopoisk / IMDB ID
- * Returns { category_id, data }
- */
-async function searchById(kpId, imdbId) {
-  const params = new URLSearchParams({ token: PHANTOM_TOKEN });
-  if (kpId) params.set('kp', kpId);
-  if (imdbId) params.set('imdb', imdbId);
-
-  const url = `${PHANTOM_API}/?${params}`;
-  console.log(`[Phantom] searchById: kp=${kpId} imdb=${imdbId}`);
-
-  const resp = await fetch(url, FETCH_OPTIONS);
-  const root = await resp.json();
-
-  if (!root.data) return null;
-  return {
-    category_id: root.data.category,
-    data: root.data,
-  };
-}
-
-/**
- * Search by title + year
- * Returns { category_id, data } or null
- */
-async function searchByTitle(title, isSerial = false, year = 0) {
-  const listType = isSerial ? 'serial' : 'movie';
-  const params = new URLSearchParams({
-    token: PHANTOM_TOKEN,
-    name: title,
-    list: listType,
+function decodeHtml(value) {
+  return String(value || '').replace(/&(quot|apos|amp|lt|gt);|&#(x[0-9a-f]+|\d+);/gi, (all, named, numeric) => {
+    if (named) return ({ quot: '"', apos: "'", amp: '&', lt: '<', gt: '>' })[named.toLowerCase()] || all;
+    const code = numeric[0].toLowerCase() === 'x' ? parseInt(numeric.slice(1), 16) : parseInt(numeric, 10);
+    return Number.isFinite(code) ? String.fromCodePoint(code) : all;
   });
-
-  const url = `${PHANTOM_API}/?${params}`;
-  console.log(`[Phantom] searchByTitle: "${title}" (${listType})`);
-
-  const resp = await fetch(url, FETCH_OPTIONS);
-  const root = await resp.json();
-
-  if (!root.data) return null;
-
-  // Try to match by title + year (like Lampac does)
-  const stitle = title.toLowerCase().trim();
-  for (const item of root.data) {
-    const itemName = (item.name || '').toLowerCase().trim();
-    if (itemName === stitle) {
-      const y = item.year || 0;
-      if (y > 0 && year > 0) {
-        if (y === year || y === year - 1 || y === year + 1) {
-          return { category_id: item.category_id || item.category, data: item };
-        }
-      } else {
-        return { category_id: item.category_id || item.category, data: item };
-      }
-    }
-  }
-
-  // Fallback: return first match if year is close
-  if (root.data.length > 0 && year > 0) {
-    for (const item of root.data) {
-      const y = item.year || 0;
-      if (y > 0 && (y === year || y === year - 1 || y === year + 1)) {
-        return { category_id: item.category_id || item.category, data: item };
-      }
-    }
-  }
-
-  return null;
 }
 
-/**
- * Get iframe content — parses fileList JSON from the iframe HTML
- * Returns { all, active } or null
- */
-async function getIframe(tokenMovie) {
-  if (!tokenMovie) return null;
-
-  const cacheKey = `iframe:${tokenMovie}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
-  const url = `${PHANTOM_LINK}/?token_movie=${tokenMovie}&token=${PHANTOM_TOKEN}`;
-  console.log(`[Phantom] getIframe: tokenMovie=${tokenMovie}`);
-
-  try {
-    const resp = await fetch(url, {
-      ...FETCH_OPTIONS,
-      headers: {
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'referer': 'https://kinogo-go.tv/',
-        'sec-fetch-dest': 'iframe',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'cross-site',
-        'upgrade-insecure-requests': '1',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      },
-    });
-    const html = await resp.text();
-
-    // Parse fileList = JSON.parse('...')
-    const match = html.match(/fileList\s*=\s*JSON\.parse\('([^'\\]*(?:\\.[^'\\]*)*)'\)/);
-    if (!match) {
-      console.log('[Phantom] getIframe: fileList not found in HTML');
-      return null;
+function parseDataJson(html) {
+  const matches = [...String(html || '').matchAll(/\bdata-json\s*=\s*(['"])([\s\S]*?)\1/gi)];
+  if (!matches.length) throw new Error('Phantom response does not contain data-json');
+  const source = String(html || '');
+  const values = matches.map((match) => {
+    try {
+      const value = JSON.parse(decodeHtml(match[2]));
+      // Series translations use a selector whose visible caption sits outside
+      // data-json: <div data-json='…'>LostFilm</div>. Keep that caption only
+      // as adapter metadata; raw Lampac HTML never leaves the backend.
+      const after = source.slice((match.index || 0) + match[0].length);
+      const label = after.match(/^\s*>([^<]{1,300})<\//)?.[1];
+      if (label && value && typeof value === 'object' && !Array.isArray(value)) value.__label = decodeHtml(label).trim();
+      return value;
+    } catch (err) {
+      throw new Error(`Phantom data-json is invalid: ${err.message}`);
     }
+  });
+  // A movie response renders one data-json element per translation, while
+  // series responses may have only one object or an array. Preserve the old
+  // single-value shape but expose all movie translations to the normalizer.
+  return values.length === 1 ? values[0] : values.flatMap((value) => Array.isArray(value) ? value : [value]);
+}
 
-    // Unescape the JSON string
-    let jsonStr = match[1]
-      .replace(/\\'/g, "'")
-      .replace(/\\\\/g, '\\')
-      .replace(/\\n/g, '\n')
-      .replace(/\\r/g, '\r')
-      .replace(/\\t/g, '\t');
+function walk(value, result = []) {
+  if (Array.isArray(value)) value.forEach((item) => walk(item, result));
+  else if (value && typeof value === 'object') {
+    result.push(value);
+    Object.values(value).forEach((item) => walk(item, result));
+  }
+  return result;
+}
 
-    const root = JSON.parse(jsonStr);
-    const result = { all: root.all, active: root.active || null };
+function asUrl(value) {
+  try { return new URL(String(value)); } catch { return null; }
+}
 
-    cacheSet(cacheKey, result, 40 * 1000); // 40 sec cache
-    return result;
+function urlParam(object, param) {
+  for (const value of [object?.url, object?.stream]) {
+    const url = asUrl(value);
+    if (url?.searchParams.get(param)) return url.searchParams.get(param);
+  }
+  return object?.[param] === undefined || object?.[param] === null ? null : String(object[param]);
+}
+
+function unique(items, key) {
+  const seen = new Set();
+  return items.filter((item) => { const value = key(item); if (!value || seen.has(value)) return false; seen.add(value); return true; });
+}
+
+// Lampac providers do not all name series fields identically. Phantom uses
+// URL `s`/`e`, while other Lampac providers can return structured cards.
+// Keep that provider variation inside the adapter layer.
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function seasonOf(item) {
+  return positiveInteger(urlParam(item, 's') ?? item?.season ?? item?.season_number ?? item?.seasonNumber);
+}
+
+function episodeOf(item) {
+  return positiveInteger(urlParam(item, 'e') ?? item?.episode ?? item?.episode_number ?? item?.episodeNumber);
+}
+
+function normalizeVoices(data) {
+  return unique(walk(data).filter((item) => {
+    if (!item || (!item.stream && !item.url)) return false;
+    const translationId = urlParam(item, 't');
+    // A selected season response includes episode cards below translation
+    // selectors. Episode cards have s/e (or s + stream) and cannot be voices.
+    if (episodeOf(item) || ((item?.type === 'season' || item?.type === 'episode' || seasonOf(item)) && !translationId)) return false;
+    return Boolean(item.translate || item.voice_name || item.__label || item.title || translationId);
+  })
+    .map((item, index) => ({
+      id: String(urlParam(item, 't') || item.translate_id || item.id || item.translate || item.voice_name || index + 1),
+      // Phantom's voice_name may contain a quality label (for example 2160p),
+      // while translate is the human-readable dubbing name.
+      name: String(item.translate || item.__label || item.voice_name || item.title || 'Озвучка'),
+      quality: item.maxquality ? String(item.maxquality) : undefined,
+    })), (voice) => `${voice.id}:${voice.name}`);
+}
+
+function normalizeSeasons(data) {
+  return [...new Set(walk(data).map(seasonOf).filter(Boolean))].sort((a, b) => a - b);
+}
+
+function normalizeEpisodes(data) {
+  return unique(walk(data).filter((item) => episodeOf(item))
+    .map((item) => ({
+      id: String(item.id || `${seasonOf(item) || 0}-${episodeOf(item)}`),
+      season: seasonOf(item) || 0, episode: episodeOf(item),
+      name: String(item.name || item.title || `${episodeOf(item)} серия`),
+      voice: item.details ? String(item.details) : undefined,
+    })), (episode) => `${episode.season}:${episode.episode}`)
+    .sort((a, b) => a.episode - b.episode);
+}
+
+function findStream(data, { translationId, season, episode } = {}) {
+  const candidates = walk(data).filter((item) => typeof item?.stream === 'string' && asUrl(item.stream));
+  const matchesTranslation = (item, index) => !translationId || urlParam(item, 't') === String(translationId)
+    || String(item.translate_id || '') === String(translationId)
+    || String(item.id || '') === String(translationId)
+    || String(item.translate || item.voice_name || '') === String(translationId)
+    || String(index + 1) === String(translationId);
+  // Phantom applies `t` to the lookup request but its resulting episode cards
+  // commonly contain only `s`, `e` and `stream`. In that shape the lookup is
+  // already translation-specific, so requiring a per-card translation field
+  // would reject every episode.
+  const hasPerCardTranslation = candidates.some((item) => urlParam(item, 't')
+    || item.translate_id || item.translate || item.voice_name);
+  const stream = candidates.find((item, index) => (!translationId || !hasPerCardTranslation || matchesTranslation(item, index))
+    && (!season || Number(urlParam(item, 's') ?? item.season) === Number(season))
+    && (!episode || Number(urlParam(item, 'e') ?? item.episode) === Number(episode)));
+  // A selected episode is an exact request. Never silently substitute the
+  // first card: that makes a missing/misparsed S01E05 play S01E01 instead.
+  return stream || (episode ? null : candidates[0] || null);
+}
+
+function buildLookupQuery({ tokenMovie, imdbId, kinopoiskId, title, originalTitle, year, mediaType, season, translationId, originalLanguage }) {
+  const query = new URLSearchParams({ serial: mediaType === 'tv' ? '1' : '0' });
+  // `orid` is Phantom's token_movie, never KinoLike/TMDB's internal id.
+  // During a normal lookup it is intentionally absent; Phantom identifies the
+  // title from IMDb/Kinopoisk or its title/year fallback.
+  if (tokenMovie) query.set('orid', String(tokenMovie));
+  if (imdbId) query.set('imdb_id', String(imdbId));
+  if (kinopoiskId) query.set('kinopoisk_id', String(kinopoiskId));
+  if (title) query.set('title', String(title).slice(0, 300));
+  if (originalTitle) query.set('original_title', String(originalTitle).slice(0, 300));
+  if (originalLanguage) query.set('original_language', String(originalLanguage).slice(0, 20));
+  if (year) query.set('year', String(year));
+  if (season) query.set('s', String(season));
+  if (translationId) query.set('t', String(translationId));
+  return query;
+}
+
+async function lookup(input) {
+  const query = buildLookupQuery(input);
+  const lookupUrl = `${LAMPAC_URL}/lite/phantom?${query}`;
+  const logQuery = new URLSearchParams(query);
+  // token_movie is a capability returned by Lampac; diagnostics must not turn
+  // it into a reusable server-log credential.
+  if (logQuery.has('orid')) logQuery.set('orid', '<redacted>');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    console.info(`[Phantom] lookup ${input.mediaType} ${input.tmdbId || input.imdbId || input.title || 'unknown'}${input.season ? ` season ${input.season}` : ''}`);
+    if (DIAGNOSTICS) console.info(`[Phantom] request ${LAMPAC_URL}/lite/phantom?${logQuery}`);
+    const response = await fetch(lookupUrl, { signal: controller.signal });
+    if (!response.ok) {
+      // Log the lookup identity (but never a stream URL/token), as a
+      // 503 for a title-only fallback looks identical to a provider outage.
+      console.warn(`[Phantom] lookup failed status=${response.status} query=${logQuery}`);
+      throw new Error(`Phantom HTTP ${response.status}`);
+    }
+    const html = await response.text();
+    if (!html.trim()) throw new Error('Phantom returned an empty response');
+    const data = parseDataJson(html);
+    if (DIAGNOSTICS) {
+      const episodes = normalizeEpisodes(data);
+      console.info(`[Phantom] response items=${walk(data).length} seasons=${normalizeSeasons(data).join(',') || '-'} episodes=${episodes.map((item) => `S${item.season}E${item.episode}`).join(',') || '-'} voices=${normalizeVoices(data).map((item) => item.id).join(',') || '-'}`);
+    }
+    return data;
   } catch (err) {
-    console.error(`[Phantom] getIframe error:`, err.message);
-    return null;
-  }
+    if (err.name === 'AbortError') throw new Error('Phantom request timed out');
+    throw err;
+  } finally { clearTimeout(timeout); }
 }
 
-// ===== Playwright stream extraction =====
-
-/**
- * Extract m3u8 stream URLs using Playwright
- * Returns { watch: { edge_hash, origin, referer }, streams: [{ quality, link }] }
- */
-async function extractStreams(tokenMovie, idFile) {
-  const cacheKey = `streams:${tokenMovie}:${idFile}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
-  let chromium;
-  try {
-    chromium = require('playwright-core').chromium;
-  } catch (e) {
-    console.error('[Phantom] playwright-core not installed:', e.message);
-    return null;
+function lampacStreamUrl(stream) {
+  const url = asUrl(stream);
+  const base = new URL(LAMPAC_URL);
+  // Lampac commonly writes 127.0.0.1 into its own HTML and playlists. That is
+  // Lampac's loopback, not the browser's or KinoLike container's loopback.
+  // Canonicalize only that trusted form to the configured private Lampac host.
+  const lampacLoopback = /^(?:127\.0\.0\.1|localhost|::1)$/i.test(url?.hostname || '') && url.port === (base.port || '80');
+  if (!url || (url.origin !== base.origin && !lampacLoopback) || !/^(?:\/lite\/phantom\/|\/proxy\/)/.test(url.pathname)) {
+    throw new Error('Phantom returned an unsafe stream URL');
   }
-
-  // Determine Chromium executable path
-  const execPath = process.env.CHROMIUM_PATH ||
-    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
-    '/usr/bin/chromium-browser';
-
-  const iframeUri = `${PHANTOM_LINK}/?token_movie=${tokenMovie}&token=${PHANTOM_TOKEN}`;
-  const iframeHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:0">
-<script>
-var f = document.createElement('iframe');
-f.src = '${iframeUri}';
-f.style.cssText = 'width:100%;height:100%;border:none;position:fixed;top:0;left:0';
-document.body.appendChild(f);
-</script></body></html>`;
-
-  let browser = null;
-  try {
-    console.log(`[Phantom] extractStreams: tokenMovie=${tokenMovie} idFile=${idFile}`);
-
-    browser = await chromium.launch({
-      executablePath: execPath,
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-gpu',
-        '--disable-dev-shm-usage',
-        '--disable-extensions',
-      ],
-    });
-
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    });
-    const page = await context.newPage();
-
-    let streams = [];
-    let watch = {};
-    let resolved = false;
-    let capturedCookies = {};
-
-    // Helper: HTTP request via node-fetch (SOCKS5 proxy)
-    async function directRequest(url, opts = {}) {
-      const directResp = await fetch(url, {
-        ...opts,
-        timeout: 12000,
-        headers: opts.headers || {},
-        redirect: 'follow',
-        agent: proxyAgent || undefined,
-      });
-      // Capture Set-Cookie headers from all responses
-      const setCookie = directResp.headers.raw()['set-cookie'];
-      if (setCookie) {
-        for (const sc of setCookie) {
-          const m = sc.match(/^([^=]+)=([^;]*)/);
-          if (m) capturedCookies[m[1].trim()] = m[2].trim();
-        }
-      }
-      return directResp;
-    }
-
-    const resultPromise = new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        if (!resolved) { resolved = true; resolve(); }
-      }, 20000);
-
-      page.route('**/*', async (route) => {
-        const url = route.request().url();
-        const method = route.request().method();
-
-        try {
-          // 1) Replace kinogo-go.tv with our iframe HTML
-          if (url.includes('kinogo-go.tv')) {
-            console.log(`[Phantom] ROUTE: kinogo-go.tv → iframe HTML`);
-            await route.fulfill({ status: 200, contentType: 'text/html', body: iframeHtml });
-            return;
-          }
-
-          // 2) Intercept POST /movies/ — fetch with correct idFile
-          if (method === 'POST' && url.includes('/movies/')) {
-            const newUrl = url.replace(/\/[0-9]+$/, `/${idFile}`);
-            const headers = { ...route.request().headers() };
-            headers['accept-encoding'] = 'gzip, deflate, br, zstd';
-            headers['cache-control'] = 'no-cache';
-            headers['dnt'] = '1';
-            headers['pragma'] = 'no-cache';
-            headers['sec-fetch-dest'] = 'empty';
-            headers['sec-fetch-mode'] = 'cors';
-            headers['sec-fetch-site'] = 'same-origin';
-
-            try {
-              console.log(`[Phantom] POST intercepted: ${url} → ${newUrl}`);
-              const directResp = await directRequest(newUrl, {
-                method: 'POST',
-                headers,
-                body: route.request().postData() || undefined,
-              });
-              const json = await directResp.json();
-              console.log(`[Phantom] POST response keys: ${Object.keys(json).join(', ')}`);
-
-              if (json.hlsSource) {
-                const items = Array.isArray(json.hlsSource) ? json.hlsSource : [json.hlsSource];
-                const selectedItem = items.find(s => s.default === true) || items[0];
-                if (selectedItem && selectedItem.quality) {
-                  for (const [q, link] of Object.entries(selectedItem.quality)) {
-                    if (link && typeof link === 'string') {
-                      const clean = link.split(' or ')[0].trim();
-                      console.log(`[Phantom] stream: ${q}p → ${clean.substring(0, 80)}`);
-                      streams.push({ quality: `${q}p`, link: clean });
-                    }
-                  }
-                }
-              } else {
-                console.log(`[Phantom] POST no hlsSource, keys: ${Object.keys(json).join(', ')}`);
-              }
-
-              await route.fulfill({ status: directResp.status, contentType: 'application/json', body: JSON.stringify(json) });
-            } catch (e) {
-              console.error('[Phantom] POST error:', e.message);
-              await route.abort();
-            }
-            return;
-          }
-
-          // 3) Capture master.m3u8 headers
-          if (url.includes('master.m3u8')) {
-            const h = route.request().headers();
-            watch = { edge_hash: h['accepts-controls'] || '', origin: h['origin'] || '', referer: h['referer'] || '' };
-            console.log(`[Phantom] master.m3u8 captured: edge_hash=${watch.edge_hash ? 'yes' : 'no'}`);
-            if (!resolved) { resolved = true; clearTimeout(timer); resolve(); }
-            await route.abort();
-            return;
-          }
-
-          // 4) Everything else: direct request via node-fetch
-          const shortUrl = url.length > 100 ? url.substring(0, 100) + '...' : url;
-          console.log(`[Phantom] ROUTE: ${method} ${shortUrl}`);
-          const directResp = await directRequest(url, {
-            method,
-            headers: route.request().headers(),
-            body: method !== 'GET' && method !== 'HEAD' ? route.request().postData() : undefined,
-          });
-          const body = await directResp.buffer();
-          const ct = directResp.headers.get('content-type') || '';
-
-          await route.fulfill({
-            status: directResp.status,
-            contentType: ct,
-            headers: Object.fromEntries([...directResp.headers].filter(([k]) => !['content-encoding', 'transfer-encoding'].includes(k))),
-            body,
-          });
-        } catch (err) {
-          console.error(`[Phantom] ROUTE error: ${method} ${url.substring(0, 80)}: ${err.message}`);
-          try { await route.abort(); } catch {}
-        }
-      });
-    });
-
-    await page.goto('https://kinogo-go.tv/', { timeout: 15000, waitUntil: 'domcontentloaded' });
-    await resultPromise;
-
-    const result = { watch, streams };
-    if (streams.length > 0) {
-      // Use captured cookies from proxy responses (Set-Cookie headers)
-      // Playwright context.cookies() returns 0 because all requests are proxied via node-fetch
-      const cookieStr = Object.entries(capturedCookies).map(([k,v]) => `${k}=${v}`).join('; ');
-      result.cookies = cookieStr;
-      console.log(`[Phantom] captured ${Object.keys(capturedCookies).length} cookies from responses`);
-      cacheSet(cacheKey, result, 10 * 60 * 1000); // 10 min cache
-    }
-    console.log(`[Phantom] extractStreams: found ${streams.length} streams`);
-    return result;
-  } catch (err) {
-    console.error('[Phantom] extractStreams error:', err.message);
-    return null;
-  } finally {
-    if (browser) {
-      try { await browser.close(); } catch {}
-    }
-  }
+  return url.origin === base.origin ? url : new URL(`${url.pathname}${url.search}`, base);
 }
 
-// ===== Content structure helpers =====
-
-/**
- * Parse content structure from iframe data
- * Returns structured content with seasons, episodes, translations
- */
-function parseContent(iframeData, category_id, serial) {
-  if (!iframeData || !iframeData.all) return null;
-
-  const all = iframeData.all;
-
-  // Movie (category 1 or 3)
-  if (category_id === 1 || category_id === 3) {
-    const videos = all.theatrical;
-    if (!videos) return null;
-
-    const translations = [];
-    for (const [translationName, sources] of Object.entries(videos)) {
-      for (const [sourceKey, fileData] of Object.entries(sources)) {
-        translations.push({
-          name: fileData.translation || translationName,
-          quality: fileData.quality || '',
-          id: fileData.id,
-          uhd: !!fileData.uhd,
-        });
-      }
-    }
-
-    return {
-      type: 'movie',
-      translations,
-    };
+// Short-lived opaque references prevent the browser from learning Lampac URLs
+// and mean this cannot be used as an arbitrary-url SSRF endpoint.
+const references = new Map();
+const REF_TTL_MS = 30 * 60 * 1000;
+function createReference(userId, url) {
+  const now = Date.now();
+  for (const [key, value] of references) if (value.expiresAt < now) references.delete(key);
+  // A playlist can create many segment refs. Bound the in-memory, ephemeral
+  // cache even if a client never returns for them.
+  if (references.size > 10000) {
+    const oldest = [...references.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt).slice(0, 1000);
+    oldest.forEach(([key]) => references.delete(key));
   }
-
-  // Serial (category 2)
-  if (serial || category_id === 2) {
-    const seasons = {};
-    const firstKey = Object.keys(all)[0];
-
-    if (firstKey && firstKey.startsWith('t')) {
-      // Translation-based format
-      for (const [transKey, transData] of Object.entries(all)) {
-        const file = transData.file || transData;
-        if (typeof file !== 'object') continue;
-
-        for (const [seasonKey, seasonData] of Object.entries(file)) {
-          if (!seasons[seasonKey]) seasons[seasonKey] = {};
-
-          if (Array.isArray(seasonData)) {
-            for (const ep of seasonData) {
-              if (ep.id_translation !== undefined) {
-                const transName = ep.translation || `voice_${ep.id_translation}`;
-                if (!seasons[seasonKey][transName]) seasons[seasonKey][transName] = [];
-                seasons[seasonKey][transName].push({
-                  episode: ep.episode,
-                  id: ep.id,
-                  translation: transName,
-                });
-              }
-            }
-          } else if (typeof seasonData === 'object') {
-            for (const [epKey, epData] of Object.entries(seasonData)) {
-              if (epData.id_translation !== undefined) {
-                const transName = epData.translation || `voice_${epData.id_translation}`;
-                if (!seasons[seasonKey][transName]) seasons[seasonKey][transName] = [];
-                seasons[seasonKey][transName].push({
-                  episode: epData.episode || parseInt(epKey),
-                  id: epData.id,
-                  translation: transName,
-                });
-              }
-            }
-          }
-        }
-      }
-    } else if (all[firstKey] && Array.isArray(all[firstKey])) {
-      // Array format
-      for (const [seasonKey, episodes] of Object.entries(all)) {
-        if (!Array.isArray(episodes)) continue;
-        seasons[seasonKey] = {};
-
-        for (const ep of episodes) {
-          for (const [voiceKey, voiceData] of Object.entries(ep)) {
-            const transName = voiceData.translation || voiceKey;
-            if (!seasons[seasonKey][transName]) seasons[seasonKey][transName] = [];
-            seasons[seasonKey][transName].push({
-              episode: voiceData.episode,
-              id: voiceData.id,
-              translation: transName,
-            });
-          }
-        }
-      }
-    } else {
-      // Object format
-      for (const [seasonKey, seasonData] of Object.entries(all)) {
-        if (typeof seasonData !== 'object') continue;
-        seasons[seasonKey] = {};
-
-        for (const [epKey, epData] of Object.entries(seasonData)) {
-          if (typeof epData !== 'object') continue;
-          for (const [voiceKey, voiceData] of Object.entries(epData)) {
-            const transName = voiceData.translation || voiceKey;
-            if (!seasons[seasonKey][transName]) seasons[seasonKey][transName] = [];
-            seasons[seasonKey][transName].push({
-              episode: voiceData.episode || parseInt(epKey),
-              id: voiceData.id,
-              translation: transName,
-            });
-          }
-        }
-      }
-    }
-
-    return {
-      type: 'serial',
-      seasons,
-    };
-  }
-
-  return null;
+  const id = crypto.randomBytes(24).toString('base64url');
+  references.set(id, { userId: Number(userId), url: lampacStreamUrl(url).toString(), expiresAt: now + REF_TTL_MS });
+  return id;
+}
+function getReference(userId, id) {
+  if (!/^[A-Za-z0-9_-]{20,80}$/.test(String(id))) return null;
+  const ref = references.get(id);
+  if (!ref || ref.expiresAt < Date.now() || ref.userId !== Number(userId)) { references.delete(id); return null; }
+  return new URL(ref.url);
 }
 
-module.exports = {
-  PHANTOM_API,
-  PHANTOM_LINK,
-  PHANTOM_TOKEN,
-  searchById,
-  searchByTitle,
-  getIframe,
-  extractStreams,
-  parseContent,
-};
+function resolvePlaylistValue(baseUrl, value) {
+  if (!value || /^(?:data:|blob:)/i.test(value)) return null;
+  if (/^\/\//.test(value) || /^[a-z][a-z\d+.-]*:/i.test(value) && !/^https?:/i.test(value)) return null;
+  let resolved;
+  try { resolved = new URL(value, baseUrl); } catch { return null; }
+  const base = new URL(LAMPAC_URL);
+  const lampacLoopback = /^(?:127\.0\.0\.1|localhost|::1)$/i.test(resolved.hostname) && resolved.port === (base.port || '80');
+  if ((resolved.origin !== base.origin && !lampacLoopback) || !resolved.pathname.startsWith('/') || resolved.pathname.split('/').includes('..')) return null;
+  // Playback is intentionally constrained to Lampac's Phantom and its own
+  // generated proxy paths; admin/API endpoints are never reachable.
+  if (!(/^(\/lite\/phantom\/|\/proxy\/)/.test(resolved.pathname))) return null;
+  return resolved.origin === base.origin ? resolved : new URL(`${resolved.pathname}${resolved.search}`, base);
+}
+
+function rewriteManifest(manifest, manifestUrl, userId) {
+  const rewrite = (value) => {
+    const resolved = resolvePlaylistValue(manifestUrl, value);
+    return resolved ? `/api/streaming/phantom/hls/${createReference(userId, resolved.toString())}` : value;
+  };
+  return String(manifest).split(/\r?\n/).map((line) => {
+    if (!line || line.startsWith('#') === false) return line ? rewrite(line.trim()) : line;
+    return line.replace(/URI="([^"]+)"/g, (_, uri) => `URI="${rewrite(uri)}"`);
+  }).join('\n');
+}
+
+module.exports = { parseDataJson, normalizeVoices, normalizeSeasons, normalizeEpisodes, findStream, buildLookupQuery, lookup, createReference, getReference, rewriteManifest, resolvePlaylistValue, lampacStreamUrl };

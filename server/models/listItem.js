@@ -1,5 +1,15 @@
 const db = require('../db/database');
 
+const SUPPORTED_STATUSES = new Set(['want_to_watch', 'watched', 'not_interested']);
+
+function assertSupportedStatus(status) {
+  if (!SUPPORTED_STATUSES.has(status)) {
+    const error = new Error(`Недопустимый статус коллекции: ${status}`);
+    error.code = 'UNSUPPORTED_STATUS';
+    throw error;
+  }
+}
+
 const ListItemModel = {
   async findAll(userId, { status, media_type, sort } = {}) {
     let query = 'SELECT * FROM user_lists WHERE user_id = $1';
@@ -30,11 +40,40 @@ const ListItemModel = {
   },
 
   // Список с метаданными из media_metadata (один SQL-запрос вместо N HTTP)
-  async findAllWithMetadata(userId, { status, media_type, sort } = {}) {
+  async findAllWithMetadata(userId, { status, media_type, sort, compact = false } = {}) {
+    const detailsExpression = compact
+      ? `jsonb_strip_nulls(jsonb_build_object(
+           'id', mm.tmdb_id,
+           'title', mm.data->>'title',
+           'name', mm.data->>'name',
+           'release_date', mm.data->>'release_date',
+           'first_air_date', mm.data->>'first_air_date',
+           'poster_path', mm.poster_path,
+           'vote_average', mm.data->'vote_average',
+           'vote_count', mm.data->'vote_count'
+         ))`
+      : `jsonb_strip_nulls(COALESCE(mm.data, '{}'::jsonb) || jsonb_build_object(
+           'imdb_id', mm.imdb_id,
+           'imdb_rating', mm.imdb_rating,
+           'imdb_votes', mm.imdb_votes
+         ))`;
+    const directorExpression = compact
+      ? `'[]'::json`
+      : `(SELECT json_agg(md2.name ORDER BY md2.name)
+          FROM media_directors md2 WHERE md2.media_metadata_id = mm.id)`;
+    const actorExpression = compact
+      ? `'[]'::json`
+      : `(SELECT json_agg(ma.name ORDER BY ma.sort_order)
+          FROM media_actors ma WHERE ma.media_metadata_id = mm.id)`;
     let query = `
       SELECT ul.*,
-             mm.data as details,
+             mm.id as media_id,
+             ${detailsExpression} as details,
+             mm.imdb_id,
+             mm.imdb_rating,
+             mm.imdb_votes,
              mm.release_year,
+             mm.locale,
              mm.title as media_title,
              mm.poster_path,
              mm.overview,
@@ -45,13 +84,11 @@ const ListItemModel = {
                '[]'::json
              ) as genre_names,
              COALESCE(
-               (SELECT json_agg(md2.name ORDER BY md2.name)
-                FROM media_directors md2 WHERE md2.media_metadata_id = mm.id),
+               ${directorExpression},
                '[]'::json
              ) as director_names,
              COALESCE(
-               (SELECT json_agg(ma.name ORDER BY ma.sort_order)
-                FROM media_actors ma WHERE ma.media_metadata_id = mm.id),
+               ${actorExpression},
                '[]'::json
              ) as actor_names
       FROM user_lists ul
@@ -99,6 +136,7 @@ const ListItemModel = {
   },
 
   async create(userId, { tmdb_id, media_type, status = 'want_to_watch' }) {
+    assertSupportedStatus(status);
     const { rows, rowCount } = await db.query(
       'INSERT INTO user_lists (user_id, tmdb_id, media_type, status) VALUES ($1, $2, $3, $4) RETURNING id',
       [userId, tmdb_id, media_type, status]
@@ -111,7 +149,7 @@ const ListItemModel = {
     const values = [];
     let idx = 1;
 
-    if (status !== undefined) { fields.push(`status = $${idx++}`); values.push(status); }
+    if (status !== undefined) { assertSupportedStatus(status); fields.push(`status = $${idx++}`); values.push(status); }
     if (rating !== undefined) { fields.push(`rating = $${idx++}`); values.push(rating); }
     if (notes !== undefined) { fields.push(`notes = $${idx++}`); values.push(notes); }
     if (watched_at !== undefined) { fields.push(`watched_at = $${idx++}`); values.push(watched_at); }
@@ -145,6 +183,7 @@ const ListItemModel = {
   },
 
   async importAll(userId, items) {
+    items.forEach((item) => assertSupportedStatus(item.status || 'want_to_watch'));
     const client = await db.connect();
     try {
       await client.query('BEGIN');

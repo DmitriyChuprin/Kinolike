@@ -218,5 +218,45 @@ function ratedMovie(overrides = {}) {
   }
 }
 
+// ── 12. mainstream score prefers reliable/popular modern titles ─────
+{
+  const watched = [
+    ratedMovie({ id: 301, rating: 10, release_date: '2018-01-01' }),
+    ratedMovie({ id: 302, rating: 9, release_date: '2020-01-01' }),
+  ];
+  const profile = build_user_profile(watched);
+  const nicheOld = movie_data(makeMovie({ id: 310, release_date: '1973-01-01', vote_average: 8.1, vote_count: 70, popularity: 5 }));
+  const knownModern = movie_data(makeMovie({ id: 311, release_date: '2018-01-01', vote_average: 7.7, vote_count: 15000, popularity: 80 }));
+  const oldScore = calculate_movie_score(nicheOld, profile);
+  const modernScore = calculate_movie_score(knownModern, profile);
+  assert.ok(modernScore.score > oldScore.score, `known modern title should win (${modernScore.score} > ${oldScore.score})`);
+  assert.ok(modernScore.components.vote_confidence > oldScore.components.vote_confidence);
+  assert.ok(modernScore.components.mainstream_score > oldScore.components.mainstream_score);
+  console.log(`✓ mainstream ranking: modern=${modernScore.score} old/niche=${oldScore.score}`);
+}
+
+// ── 13. configurable thresholds and era preference ─────────────────
+{
+  const lowVotes = makeMovie({ id: 320, vote_average: 8, vote_count: 70, popularity: 3 });
+  assert.ok(!require('../services/personalRecommendations').candidate_passes_thresholds(lowVotes), 'low-confidence title should fail default threshold');
+  assert.ok(require('../services/personalRecommendations').candidate_passes_thresholds(lowVotes, { prefer_hidden_gems: true }), 'hidden-gem query should relax thresholds');
+
+  const modernProfile = build_user_profile([
+    ratedMovie({ id: 321, rating: 10, release_date: '2018-01-01' }),
+    ratedMovie({ id: 322, rating: 9, release_date: '2020-01-01' }),
+  ]);
+  const classicProfile = build_user_profile([
+    ratedMovie({ id: 323, rating: 10, release_date: '1975-01-01' }),
+    ratedMovie({ id: 324, rating: 9, release_date: '1988-01-01' }),
+  ]);
+  const oldTitle = makeMovie({ id: 325, release_date: '1978-01-01', vote_average: 8, vote_count: 12000, popularity: 70 });
+  const modernPenalty = require('../services/personalRecommendations').calculate_freshness_score(oldTitle, modernProfile);
+  const classicPenalty = require('../services/personalRecommendations').calculate_freshness_score(oldTitle, classicProfile);
+  const explicitClassic = require('../services/personalRecommendations').calculate_freshness_score(oldTitle, modernProfile, { prefer_classics: true });
+  assert.ok(classicPenalty > modernPenalty, 'classic preference should reduce the old-film penalty');
+  assert.ok(explicitClassic > modernPenalty, 'explicit classic query should disable the freshness penalty');
+  console.log(`✓ era preference: modern=${modernPenalty} classic=${classicPenalty} explicit=${explicitClassic}`);
+}
+
 console.log('\n═══════════════════════════════');
 console.log('All recommendation tests passed!');
