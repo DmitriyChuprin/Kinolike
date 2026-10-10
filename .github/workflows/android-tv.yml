@@ -1,0 +1,60 @@
+name: KinoLike TV APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'android-tv/**'
+      - '.github/workflows/android-tv.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-debug-apk:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install required Android SDK components
+        shell: bash
+        run: |
+          set -o pipefail
+          yes | sdkmanager --licenses
+          sdkmanager --install "platforms;android-37" "build-tools;36.0.0"
+
+      - name: Verify Gradle Wrapper
+        working-directory: android-tv
+        run: |
+          test -x gradlew
+          ./gradlew --version
+
+      - name: Assemble debug APK
+        working-directory: android-tv
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Verify APK output
+        working-directory: android-tv
+        run: test -f app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: KinoLike-TV-debug
+          path: android-tv/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30

@@ -14,7 +14,7 @@
 ## Требования
 
 - JDK 17;
-- Android SDK Platform 36 и Build Tools 36;
+- Android SDK Platform 37 и Build Tools 36;
 - доступ к Google Maven и Maven Central при первой сборке;
 - сервер KinoLike с корректным публичным HTTPS-сертификатом.
 
@@ -29,6 +29,23 @@
 ```
 
 APK появится в `app/build/outputs/apk/debug/app-debug.apk`.
+
+## Сборка APK в GitHub Actions
+
+Workflow **KinoLike TV APK** собирает debug APK в облаке. Он запускается
+автоматически при push в `main`, если изменились файлы в `android-tv/` или
+`.github/workflows/android-tv.yml`. Его также можно запустить вручную:
+
+1. Откройте репозиторий на GitHub и перейдите в **Actions**.
+2. Выберите workflow **KinoLike TV APK**.
+3. Нажмите **Run workflow**, выберите ветку и подтвердите запуск.
+4. После успешной сборки откройте этот запуск и в разделе **Artifacts**
+   скачайте `KinoLike-TV-debug`. В архиве находится
+   `app-debug.apk`.
+
+Артефакт хранится 30 дней. Workflow использует JDK 17, Android SDK Platform 37
+и Build Tools 36.0.0; секреты для сборки не требуются и в репозиторий не
+добавляются.
 
 ## Установка на SberBox
 
@@ -51,6 +68,13 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```bash
 adb shell am start -n ru.kinolike.tv/.MainActivity
 ```
+
+Для APK из GitHub Actions сначала распакуйте скачанный артефакт, затем укажите
+путь к `app-debug.apk` в команде `adb install -r`. Ключ `-r` обновляет
+приложение поверх установленного и сохраняет его данные: настройки сервера и
+сессию. Не используйте `adb uninstall ru.kinolike.tv`, если данные нужно
+сохранить. Если приложение было подписано другим ключом, Android потребует
+сначала удалить старую версию; это удалит его локальные данные.
 
 Удаление: `adb uninstall ru.kinolike.tv`.
 
